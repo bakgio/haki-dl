@@ -213,7 +213,14 @@ jobs:
           set -euo pipefail
           NDK_VERSION="27.2.12479018"
           ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}"
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          set +o pipefail
+          yes 2>/dev/null | "${SDKMANAGER}" --install "ndk;${NDK_VERSION}"
+          SDKMANAGER_STATUS="${PIPESTATUS[1]}"
+          set -o pipefail
+          if [ "${SDKMANAGER_STATUS}" -ne 0 ]; then
+            exit "${SDKMANAGER_STATUS}"
+          fi
           echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
           echo "${ANDROID_HOME}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
