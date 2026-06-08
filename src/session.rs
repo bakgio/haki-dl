@@ -4596,7 +4596,8 @@ fn create_live_pipe_endpoints(names: &[String], _pipe_dir: &Path) -> Result<Vec<
 
 #[cfg(not(windows))]
 fn create_live_pipe_endpoints(names: &[String], pipe_dir: &Path) -> Result<Vec<LivePipeEndpoint>> {
-    use rustix::fs::{CWD, Mode, mkfifoat};
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
 
     let mut paths = Vec::with_capacity(names.len());
     for name in names {
@@ -4604,7 +4605,7 @@ fn create_live_pipe_endpoints(names: &[String], pipe_dir: &Path) -> Result<Vec<L
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
-        mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR)
+        mkfifo(&path, Mode::S_IRUSR | Mode::S_IWUSR)
             .map_err(|error| Error::live(error.to_string()))?;
         paths.push(path);
     }

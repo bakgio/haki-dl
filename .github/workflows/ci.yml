@@ -127,7 +127,7 @@ jobs:
         run: echo "date=$(date -u +'%Y%m%d')" >> "$GITHUB_OUTPUT"
 
   build-release-binaries:
-    name: Build Release Binary (${{ matrix.label }})
+    name: Build Release Binaries
     needs: [fmt, clippy, test, msrv, docs, audit, check-version]
     if: github.event_name == 'push' && needs.check-version.outputs.new_release == 'true'
     runs-on: ${{ matrix.os }}
