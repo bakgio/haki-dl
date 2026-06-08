@@ -171,7 +171,7 @@ jobs:
             archive: tar.gz
             binary: haki-dl
           - label: macos-x64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
             binary: haki-dl
