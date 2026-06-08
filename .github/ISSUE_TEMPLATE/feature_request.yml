@@ -1,0 +1,88 @@
+name: Feature Request
+description: Suggest a new capability or improvement for haki-dl
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Please describe the use case so we can evaluate the request on real constraints instead of assumptions.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of haki-dl does this relate to?
+      multiple: true
+      options:
+        - Library API
+        - CLI ergonomics
+        - HLS support
+        - DASH support
+        - MSS support
+        - Live recording
+        - Decryption or key handling
+        - Subtitle conversion or extraction
+        - Merge, mux, or backend support
+        - Capture or license workflow
+        - Packaging or installation
+        - CI or release process
+        - Documentation
+        - Performance
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Motivation
+      description: What problem does this feature solve, or what workflow does it unblock?
+      placeholder: "I'm trying to ... but haki-dl currently ..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: importance
+    attributes:
+      label: Importance
+      description: How important is this request to you?
+      options:
+        - Nice to have
+        - Important
+        - Blocking
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe how you think this should work. API sketches, CLI examples, or references are useful.
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What alternatives or workarounds have you considered?
+    validations:
+      required: false
+
+  - type: textarea
+    id: sample-media
+    attributes:
+      label: Sample Media or Format Context
+      description: If this request depends on a specific manifest, container, codec, DRM mode, or fixture shape, describe it here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Anything else that would help us evaluate this request.
+    validations:
+      required: false

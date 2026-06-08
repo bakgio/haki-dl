@@ -1,0 +1,359 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - run: cargo test --all-features -- --include-ignored
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # 1.88
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - run: cargo check --all-features
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - name: Build docs
+        run: cargo doc -p haki-dl --all-features --no-deps
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        run: cargo audit
+
+  check-version:
+    name: Check for new version
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new_release: ${{ steps.tag.outputs.new_release }}
+      date: ${{ steps.date.outputs.date }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "new_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set release date
+        id: date
+        run: echo "date=$(date -u +'%Y%m%d')" >> "$GITHUB_OUTPUT"
+
+  build-release-binaries:
+    name: Build Release Binary (${{ matrix.label }})
+    needs: [fmt, clippy, test, msrv, docs, audit, check-version]
+    if: github.event_name == 'push' && needs.check-version.outputs.new_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            binary: haki-dl.exe
+          - label: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: zip
+            binary: haki-dl.exe
+          - label: windows-x86
+            os: windows-latest
+            target: i686-pc-windows-msvc
+            archive: zip
+            binary: haki-dl.exe
+          - label: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            binary: haki-dl
+          - label: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            binary: haki-dl
+          - label: linux-musl-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            binary: haki-dl
+          - label: linux-musl-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+            binary: haki-dl
+          - label: macos-x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+            binary: haki-dl
+          - label: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            binary: haki-dl
+          - label: android-bionic-arm64
+            os: ubuntu-latest
+            target: aarch64-linux-android
+            archive: tar.gz
+            binary: haki-dl
+          - label: android-bionic-x64
+            os: ubuntu-latest
+            target: x86_64-linux-android
+            archive: tar.gz
+            binary: haki-dl
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl') && runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Android NDK
+        if: contains(matrix.target, 'linux-android')
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK_VERSION="27.2.12479018"
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "${ANDROID_HOME}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Build binary
+        shell: bash
+        run: |
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            export RUSTFLAGS="-Dwarnings -C target-feature=+crt-static"
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-linux-android" ]; then
+            TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="${TOOLCHAIN}/aarch64-linux-android24-clang"
+            export CC_aarch64_linux_android="${TOOLCHAIN}/aarch64-linux-android24-clang"
+            export CXX_aarch64_linux_android="${TOOLCHAIN}/aarch64-linux-android24-clang++"
+            export AR_aarch64_linux_android="${TOOLCHAIN}/llvm-ar"
+          fi
+          if [ "${{ matrix.target }}" = "x86_64-linux-android" ]; then
+            TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="${TOOLCHAIN}/x86_64-linux-android24-clang"
+            export CC_x86_64_linux_android="${TOOLCHAIN}/x86_64-linux-android24-clang"
+            export CXX_x86_64_linux_android="${TOOLCHAIN}/x86_64-linux-android24-clang++"
+            export AR_x86_64_linux_android="${TOOLCHAIN}/llvm-ar"
+          fi
+          cargo build --release --all-features --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+          DATE: ${{ needs.check-version.outputs.date }}
+          LABEL: ${{ matrix.label }}
+          TARGET: ${{ matrix.target }}
+          BINARY: ${{ matrix.binary }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          ASSET_BASE="haki-dl_v${VERSION}_${LABEL}_${DATE}"
+          mkdir -p dist
+          cp "target/${TARGET}/release/${BINARY}" "dist/${BINARY}"
+          cd dist
+          if [ "${ARCHIVE}" = "zip" ]; then
+            7z a "../${ASSET_BASE}.zip" "${BINARY}"
+          else
+            tar -czf "../${ASSET_BASE}.tar.gz" "${BINARY}"
+          fi
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: haki-dl_v${{ needs.check-version.outputs.version }}_${{ matrix.label }}_*
+
+  # semver:
+  #   name: Semver Check (non-blocking until 0.2.0)
+  #   runs-on: ubuntu-latest
+  #   continue-on-error: true
+  #   steps:
+  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+  #     - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+  #       with:
+  #         toolchain: stable
+  #     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+  #     - name: Install cargo-semver-checks
+  #       run: cargo install cargo-semver-checks --locked
+  #     - run: cargo semver-checks -p haki-dl
+
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      [
+        fmt,
+        clippy,
+        test,
+        msrv,
+        docs,
+        audit,
+        check-version,
+        build-release-binaries,
+      ]
+    if: github.event_name == 'push' && needs.check-version.outputs.new_release == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Extract changelog
+        id: changelog
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+          DATE: ${{ needs.check-version.outputs.date }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          TITLE=$(awk "/^# ${VERSION//./\\.} /{print; exit}" CHANGELOG.md)
+          TITLE="${TITLE#\# }"
+          BODY=$(awk "/^# ${VERSION//./\\.} /{found=1; next} /^# /{if(found) exit} found{print}" CHANGELOG.md)
+          ASSET_URL="https://github.com/${REPOSITORY}/releases/download/v${VERSION}"
+          {
+            echo "$BODY"
+            echo
+            cat <<RELEASE_TABLE
+          ---
+
+          | Platform | Architecture | Recommended for | Download |
+          | --- | --- | --- | --- |
+          | Windows | x64 | Modern 64-bit Windows systems | [windows-x64.zip](${ASSET_URL}/haki-dl_v${VERSION}_windows-x64_${DATE}.zip) |
+          | Windows | ARM64 | Windows on ARM devices | [windows-arm64.zip](${ASSET_URL}/haki-dl_v${VERSION}_windows-arm64_${DATE}.zip) |
+          | Windows | x86 | 32-bit Windows systems | [windows-x86.zip](${ASSET_URL}/haki-dl_v${VERSION}_windows-x86_${DATE}.zip) |
+          | Linux | x64 | Standard glibc Linux distributions | [linux-x64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_linux-x64_${DATE}.tar.gz) |
+          | Linux | ARM64 | ARM64 Linux servers and devices | [linux-arm64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_linux-arm64_${DATE}.tar.gz) |
+          | Linux musl | x64 | Alpine, OpenWrt, and other musl environments | [linux-musl-x64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_linux-musl-x64_${DATE}.tar.gz) |
+          | Linux musl | ARM64 | ARM64 musl environments | [linux-musl-arm64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_linux-musl-arm64_${DATE}.tar.gz) |
+          | macOS | Intel x64 | Intel Mac systems | [macos-x64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_macos-x64_${DATE}.tar.gz) |
+          | macOS | Apple Silicon | M1/M2/M3/M4 Mac systems | [macos-arm64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_macos-arm64_${DATE}.tar.gz) |
+          | Android (Termux) | ARM64 | Termux on ARM64 Android devices with Bionic | [android-bionic-arm64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_android-bionic-arm64_${DATE}.tar.gz) |
+          | Android (Termux) | x64 | x86_64 Android devices with Bionic | [android-bionic-x64.tar.gz](${ASSET_URL}/haki-dl_v${VERSION}_android-bionic-x64_${DATE}.tar.gz) |
+
+          RELEASE_TABLE
+          } > release-body.md
+          echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: ${{ steps.changelog.outputs.title }}
+          body_path: release-body.md
+          files: release-assets/*
