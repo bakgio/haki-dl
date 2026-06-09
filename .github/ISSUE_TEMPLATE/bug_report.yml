@@ -13,7 +13,7 @@ body:
     attributes:
       label: haki-dl Version
       description: Which version are you using?
-      placeholder: "0.1.0"
+      placeholder: "0.2.0"
     validations:
       required: true
 

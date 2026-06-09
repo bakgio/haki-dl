@@ -28,14 +28,14 @@
 
 ```toml
 [dependencies]
-haki-dl = "0.1.0"
+haki-dl = "0.2.0"
 tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros"] }
 
 # With optional features:
-# haki-dl = { version = "0.1.0", features = ["mp4forge"] }
-# haki-dl = { version = "0.1.0", features = ["serde"] }
+# haki-dl = { version = "0.2.0", features = ["mp4forge"] }
+# haki-dl = { version = "0.2.0", features = ["serde"] }
 # Minimal builds can opt out of defaults:
-# haki-dl = { version = "0.1.0", default-features = false }
+# haki-dl = { version = "0.2.0", default-features = false }
 ```
 
 Install the CLI from crates.io:

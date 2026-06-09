@@ -128,7 +128,7 @@ jobs:
 
   build-release-binaries:
     name: Build Release Binaries
-    needs: [fmt, clippy, test, msrv, docs, audit, check-version]
+    needs: [fmt, clippy, test, msrv, docs, audit, check-version, semver]
     if: github.event_name == 'push' && needs.check-version.outputs.new_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
@@ -274,19 +274,19 @@ jobs:
           name: ${{ matrix.label }}
           path: haki-dl_v${{ needs.check-version.outputs.version }}_${{ matrix.label }}_*
 
-  # semver:
-  #   name: Semver Check (non-blocking until 0.2.0)
-  #   runs-on: ubuntu-latest
-  #   continue-on-error: true
-  #   steps:
-  #     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-  #     - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
-  #       with:
-  #         toolchain: stable
-  #     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
-  #     - name: Install cargo-semver-checks
-  #       run: cargo install cargo-semver-checks --locked
-  #     - run: cargo semver-checks -p haki-dl
+  semver:
+    name: Semver Check (non-blocking before 1.0)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      - run: cargo semver-checks -p haki-dl
 
   release:
     name: GitHub Release
@@ -300,6 +300,7 @@ jobs:
         docs,
         audit,
         check-version,
+        semver,
         build-release-binaries,
       ]
     if: github.event_name == 'push' && needs.check-version.outputs.new_release == 'true'

@@ -21,6 +21,7 @@ use crate::mux::{MuxFormat, MuxImport};
 
 static CTRL_C_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 static CTRL_C_STATE: OnceLock<Mutex<Option<ConsoleSignalState>>> = OnceLock::new();
+const ANSI_ERROR_RED: &str = "38;5;9";
 
 #[derive(Clone)]
 struct ConsoleSignalState {
@@ -690,7 +691,7 @@ where
 {
     let tokens = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let detected_language = pre_scan_ui_language(&tokens);
-    match parse_args(tokens).await {
+    match parse_args(tokens.iter().cloned()).await {
         Ok(CliParseResult::Request(request)) => {
             let mut request = *request;
             let language = request.options.ui_language.or(detected_language);
@@ -735,7 +736,11 @@ where
             ExitCode::SUCCESS
         }
         Err(error) => {
-            render_standalone_cli_error(&error, detected_language);
+            if is_missing_input_error(&error) {
+                render_missing_input_help(&tokens);
+            } else {
+                render_standalone_cli_error(&error, detected_language);
+            }
             ExitCode::from(2)
         }
     }
@@ -832,12 +837,38 @@ fn render_standalone_cli_error(error: &Error, language: Option<UiLanguage>) {
     }
 }
 
+fn is_missing_input_error(error: &Error) -> bool {
+    matches!(error, Error::Config { message } if message == "input is required")
+}
+
+fn render_missing_input_help(tokens: &[String]) {
+    let message = "Required argument missing for command: 'haki-dl'.";
+    if help_ansi_color_enabled(tokens) {
+        eprintln!("\x1b[{ANSI_ERROR_RED}m{message}\x1b[0m");
+    } else {
+        eprintln!("{message}");
+    }
+    let _ = std::io::stderr().flush();
+    println!();
+    println!("{}", help_text());
+}
+
+fn help_ansi_color_enabled(tokens: &[String]) -> bool {
+    !tokens.iter().any(|token| {
+        let (name, inline_value) = split_inline_option(token.clone());
+        name == "--no-ansi-color" && inline_value.as_deref() != Some("false")
+    })
+}
+
 fn apply_terminal_defaults(
     options: &mut DownloadOptions,
     stdout_redirected: bool,
     stderr_redirected: bool,
 ) {
     if stdout_redirected || stderr_redirected {
+        if options.force_ansi_console && !options.no_ansi_color {
+            return;
+        }
         options.force_ansi_console = true;
         options.no_ansi_color = true;
     }
@@ -2112,39 +2143,394 @@ fn pre_scan_ui_language(tokens: &[String]) -> Option<UiLanguage> {
 }
 
 fn morehelp_text(topic: &str, _language: Option<UiLanguage>) -> String {
-    match topic {
+    let message = match topic {
         "mux-after-done" => mux_help(),
         "mux-import" => import_help(),
-        "select-video" | "select-audio" | "select-subtitle" => selection_help(),
+        "select-video" => select_video_help(),
+        "select-audio" => select_audio_help(),
+        "select-subtitle" => select_subtitle_help(),
         "custom-range" => range_help(),
-        topic => no_help_text(topic),
-    }
+        topic => format!("Option=\"{topic}\" not found"),
+    };
+    format!("More Help:\n\n  --{topic}\n\n{message}")
 }
 
 fn help_text() -> String {
     [
         format!("Description:\n  haki-dl {}", env!("CARGO_PKG_VERSION")),
         "Usage:\n  haki-dl <input> [options]".to_string(),
-        "Arguments:\n  <input>  Input URL or file".to_string(),
+        "Arguments:\n  <input>  Input Url or File".to_string(),
         format!("Options:\n{}", help_options_text()),
     ]
     .join("\n\n")
 }
 
 fn help_options_text() -> String {
-    CLI_SCHEMA
+    const DESCRIPTION_COLUMN: usize = 58;
+    let description_width = help_description_width(DESCRIPTION_COLUMN);
+    let mut rows = CLI_SCHEMA
         .iter()
         .filter(|row| row.value_kind != CliSchemaValueKind::Positional && row.show_in_help)
-        .map(|row| {
-            let aliases = row.aliases.join(", ");
-            if row.default == "none" || row.default == "false" {
-                format!("  {aliases}")
-            } else {
-                format!("  {aliases} [default: {}]", row.default)
-            }
-        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| help_option_order(row.canonical));
+    rows.into_iter()
+        .map(|row| help_option_text(row, DESCRIPTION_COLUMN, description_width))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn help_description_width(description_column: usize) -> usize {
+    if !std::io::stdout().is_terminal() {
+        return usize::MAX;
+    }
+    let terminal_width = help_terminal_width().unwrap_or(120);
+    terminal_width.saturating_sub(description_column).max(36)
+}
+
+fn help_terminal_width() -> Option<usize> {
+    #[cfg(feature = "cli")]
+    {
+        crossterm::terminal::size()
+            .ok()
+            .map(|(width, _)| usize::from(width))
+    }
+    #[cfg(not(feature = "cli"))]
+    {
+        None
+    }
+}
+
+fn help_option_order(canonical: &str) -> usize {
+    match canonical {
+        "tmp_dir" => 0,
+        "save_dir" => 1,
+        "save_name" => 2,
+        "save_pattern" => 3,
+        "log_file_path" => 4,
+        "base_url" => 5,
+        "thread_count" => 6,
+        "download_retry_count" => 7,
+        "http_request_timeout" => 8,
+        "force_ansi_console" => 9,
+        "no_ansi_color" => 10,
+        "auto_select" => 11,
+        "skip_merge" => 12,
+        "skip_download" => 13,
+        "check_segments_count" => 14,
+        "binary_merge" => 15,
+        "use_ffmpeg_concat_demuxer" => 16,
+        "del_after_done" => 17,
+        "no_date_info" => 18,
+        "no_log" => 19,
+        "write_meta_json" => 20,
+        "append_url_params" => 21,
+        "concurrent_download" => 22,
+        "header" => 23,
+        "sub_only" => 24,
+        "sub_format" => 25,
+        "auto_subtitle_fix" => 26,
+        "ffmpeg_binary_path" => 27,
+        "log_level" => 28,
+        "ui_language" => 29,
+        "urlprocessor_args" => 30,
+        "key" => 31,
+        "key_text_file" => 32,
+        "decryption_engine" => 33,
+        "decryption_binary_path" => 34,
+        "mp4_real_time_decryption" => 35,
+        "max_speed" => 36,
+        "mux_after_done" => 37,
+        "custom_hls_method" => 38,
+        "custom_hls_key" => 39,
+        "custom_hls_iv" => 40,
+        "use_system_proxy" => 41,
+        "custom_proxy" => 42,
+        "custom_range" => 43,
+        "task_start_at" => 44,
+        "live_perform_as_vod" => 45,
+        "live_real_time_merge" => 46,
+        "live_keep_segments" => 47,
+        "live_pipe_mux" => 48,
+        "live_fix_vtt_by_audio" => 49,
+        "live_record_limit" => 50,
+        "live_wait_time" => 51,
+        "live_take_count" => 52,
+        "mux_import" => 53,
+        "select_video" => 54,
+        "select_audio" => 55,
+        "select_subtitle" => 56,
+        "drop_video" => 57,
+        "drop_audio" => 58,
+        "drop_subtitle" => 59,
+        "ad_keyword" => 60,
+        "disable_update_check" => 61,
+        "allow_hls_multi_ext_map" => 62,
+        "morehelp" => 63,
+        "help" => 64,
+        "version" => 65,
+        _ => usize::MAX,
+    }
+}
+
+fn help_option_text(
+    row: &CliOptionSchema,
+    description_column: usize,
+    description_width: usize,
+) -> String {
+    let left = help_option_left(row);
+    let description = help_option_description(row);
+    format_help_columns(&left, &description, description_column, description_width)
+}
+
+fn help_option_left(row: &CliOptionSchema) -> String {
+    let mut left = row.aliases.join(", ");
+    if let Some(value_name) = help_option_value_name(row) {
+        left.push(' ');
+        left.push_str(value_name);
+    }
+    format!("  {left}")
+}
+
+fn format_help_columns(
+    left: &str,
+    description: &str,
+    description_column: usize,
+    description_width: usize,
+) -> String {
+    let indent = " ".repeat(description_column);
+    let mut lines = Vec::new();
+    for (index, raw_line) in description
+        .lines()
+        .flat_map(|line| wrap_help_description(line, description_width))
+        .enumerate()
+    {
+        if index == 0 {
+            if left.len() >= description_column {
+                lines.push(left.to_string());
+                lines.push(format!("{indent}{raw_line}"));
+            } else {
+                lines.push(format!(
+                    "{left}{spaces}{raw_line}",
+                    spaces = " ".repeat(description_column - left.len())
+                ));
+            }
+        } else {
+            lines.push(format!("{indent}{raw_line}"));
+        }
+    }
+    lines.join("\n")
+}
+
+fn wrap_help_description(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut wrapped = Vec::new();
+    let mut remaining = line.trim();
+    if remaining.len() <= width {
+        return vec![remaining.to_string()];
+    }
+    while remaining.len() > width {
+        let split_at = remaining[..width]
+            .rfind(' ')
+            .filter(|index| *index > 0)
+            .unwrap_or(width);
+        wrapped.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+    wrapped.push(remaining.to_string());
+    wrapped
+}
+
+fn help_option_value_name(row: &CliOptionSchema) -> Option<&'static str> {
+    match row.canonical {
+        "tmp_dir" => Some("<tmp-dir>"),
+        "save_dir" => Some("<save-dir>"),
+        "save_name" => Some("<save-name>"),
+        "save_pattern" => Some("<save-pattern>"),
+        "log_file_path" => Some("<log-file-path>"),
+        "base_url" => Some("<base-url>"),
+        "thread_count" => Some("<number>"),
+        "download_retry_count" => Some("<number>"),
+        "http_request_timeout" => Some("<seconds>"),
+        "header" => Some("<header>"),
+        "sub_format" => Some("<SRT|VTT>"),
+        "ffmpeg_binary_path" => Some("<PATH>"),
+        "log_level" => Some("<DEBUG|ERROR|INFO|OFF|WARN>"),
+        "ui_language" => Some("<auto|en-US>"),
+        "urlprocessor_args" => Some("<urlprocessor-args>"),
+        "key" => Some("<key>"),
+        "key_text_file" => Some("<key-text-file>"),
+        "decryption_engine" => Some("<FFMPEG|MP4DECRYPT|MP4FORGE|SHAKA_PACKAGER>"),
+        "decryption_binary_path" => Some("<PATH>"),
+        "max_speed" => Some("<SPEED>"),
+        "mux_after_done" => Some("<OPTIONS>"),
+        "mux_import" => Some("<OPTIONS>"),
+        "custom_hls_method" => Some("<METHOD>"),
+        "custom_hls_key" => Some("<FILE|HEX|BASE64>"),
+        "custom_hls_iv" => Some("<FILE|HEX|BASE64>"),
+        "custom_proxy" => Some("<URL>"),
+        "custom_range" => Some("<RANGE>"),
+        "task_start_at" => Some("<yyyyMMddHHmmss>"),
+        "live_record_limit" => Some("<HH:mm:ss>"),
+        "live_wait_time" => Some("<SEC>"),
+        "live_take_count" => Some("<NUM>"),
+        "select_video" | "select_audio" | "select_subtitle" | "drop_video" | "drop_audio"
+        | "drop_subtitle" => Some("<OPTIONS>"),
+        "ad_keyword" => Some("<REG>"),
+        "morehelp" => Some("<OPTION>"),
+        _ => None,
+    }
+}
+
+fn help_option_description(row: &CliOptionSchema) -> String {
+    let description = match row.canonical {
+        "tmp_dir" => "Set temporary file directory",
+        "save_dir" => "Set output directory",
+        "save_name" => "Set output filename",
+        "save_pattern" => {
+            "Set output filename pattern with variables:\n<SaveName>, <Id>, <Codecs>, <Language>, <Resolution>,\n<Bandwidth>, <MediaType>, <Channels>, <FrameRate>,\n<VideoRange>, <GroupId>, <Ext>\nExample: --save-pattern \"<SaveName>_<Resolution>_<Bandwidth>\""
+        }
+        "log_file_path" => "Set log file path, Example: C:\\Logs\\log.txt",
+        "base_url" => "Set BaseURL",
+        "thread_count" => "Set download thread count",
+        "download_retry_count" => "The number of retries when download segment error",
+        "http_request_timeout" => "Timeout duration for HTTP requests (in seconds)",
+        "force_ansi_console" => "Force assuming the terminal is ANSI-compatible and interactive",
+        "no_ansi_color" => "Remove ANSI colors",
+        "disable_update_check" => "Disable version update check",
+        "auto_select" => "Automatically selects the best tracks of all types",
+        "skip_merge" => "Skip segments merge",
+        "skip_download" => "Skip download",
+        "check_segments_count" => {
+            "Check if the actual number of segments downloaded matches the expected number"
+        }
+        "binary_merge" => "Binary merge",
+        "use_ffmpeg_concat_demuxer" => {
+            "When merging with ffmpeg, use the concat demuxer instead of the concat protocol"
+        }
+        "del_after_done" => "Delete temporary files when done",
+        "no_date_info" => "Date information is not written during muxing",
+        "no_log" => "Disable log file output",
+        "write_meta_json" => "Write meta json after parsed",
+        "append_url_params" => {
+            "Add Params of input Url to segments, useful for some websites, such as kakao.com"
+        }
+        "concurrent_download" => "Concurrently download the selected audio, video and subtitles",
+        "header" => {
+            "Pass custom header(s) to server, Example:\n-H \"Cookie: mycookie\" -H \"User-Agent: iOS\""
+        }
+        "sub_only" => "Select only subtitle tracks",
+        "sub_format" => "Subtitle output format",
+        "auto_subtitle_fix" => "Automatically fix subtitles",
+        "ffmpeg_binary_path" => "Full path to the ffmpeg binary, like C:\\Tools\\ffmpeg.exe",
+        "log_level" => "Set log level",
+        "ui_language" => "Set UI language",
+        "urlprocessor_args" => "Give these arguments to the URL Processors.",
+        "key" => {
+            "Set decryption key(s) to mp4decrypt/shaka-packager/ffmpeg/mp4forge. format:\n--key KID1:KEY1 --key KID2:KEY2\nor use --key KEY if all tracks share the same key."
+        }
+        "key_text_file" => {
+            "Set the kid-key file, the program will search the KEY with KID from the file. (Very large files are not recommended)"
+        }
+        "decryption_engine" => "Set the third-party program used for decryption",
+        "decryption_binary_path" => {
+            "Full path to the tool used for MP4 decryption, like C:\\Tools\\mp4decrypt.exe"
+        }
+        "mp4_real_time_decryption" => "Decrypt MP4 segments in real time",
+        "select_video" => {
+            "Select video streams by regular expressions. Use \"--morehelp select-video\" for more details"
+        }
+        "select_audio" => {
+            "Select audio streams by regular expressions. Use \"--morehelp select-audio\" for more details"
+        }
+        "select_subtitle" => {
+            "Select subtitle streams by regular expressions. Use \"--morehelp select-subtitle\" for more details"
+        }
+        "drop_video" => "Drop video streams by regular expressions.",
+        "drop_audio" => "Drop audio streams by regular expressions.",
+        "drop_subtitle" => "Drop subtitle streams by regular expressions.",
+        "custom_range" => {
+            "Download only part of the segments. Use \"--morehelp custom-range\" for more details"
+        }
+        "ad_keyword" => "Set URL keywords (regular expressions) for AD segments",
+        "max_speed" => "Set speed limit, Mbps or Kbps, for example: 15M 100K.",
+        "mux_after_done" => {
+            "When all works is done, try to mux the downloaded streams. Use \"--morehelp mux-after-done\" for more details"
+        }
+        "mux_import" => {
+            "When MuxAfterDone enabled, allow to import local media files. Use \"--morehelp mux-import\" for more details"
+        }
+        "custom_hls_method" => {
+            "Set HLS encryption method (AES_128|AES_128_ECB|CENC|CHACHA20|NONE|SAMPLE_AES|SAMPLE_AES_CTR|UNKNOWN)"
+        }
+        "custom_hls_key" => "Set the HLS decryption key. Can be file, HEX or Base64",
+        "custom_hls_iv" => "Set the HLS decryption iv. Can be file, HEX or Base64",
+        "allow_hls_multi_ext_map" => "Allow multiple #EXT-X-MAP in HLS (experimental)",
+        "use_system_proxy" => "Use system default proxy",
+        "custom_proxy" => "Set web request proxy, like http://127.0.0.1:8888",
+        "task_start_at" => "Task execution will not start before this time",
+        "live_perform_as_vod" => "Download live streams as vod",
+        "live_real_time_merge" => "Real-time merge into file when recording live",
+        "live_keep_segments" => "Keep segments when recording a live (liveRealTimeMerge enabled)",
+        "live_pipe_mux" => {
+            "Real-time muxing to TS file through pipeline + ffmpeg (liveRealTimeMerge enabled)"
+        }
+        "live_fix_vtt_by_audio" => "Correct VTT sub by reading the start time of the audio file",
+        "live_record_limit" => "Recording time limit when recording live",
+        "live_wait_time" => "Manually set the live playlist refresh interval",
+        "live_take_count" => {
+            "Manually set the number of segments downloaded for the first time when recording live"
+        }
+        "help" => "Show help and usage information",
+        "version" => "Show version information",
+        "morehelp" => "Set more help info about one option",
+        _ => "",
+    };
+    if let Some(default) = help_option_default(row) {
+        format!("{description} [default: {default}]")
+    } else {
+        description.to_string()
+    }
+}
+
+fn help_option_default(row: &CliOptionSchema) -> Option<String> {
+    match row.canonical {
+        "auto_select"
+        | "skip_merge"
+        | "skip_download"
+        | "binary_merge"
+        | "use_ffmpeg_concat_demuxer"
+        | "no_date_info"
+        | "no_log"
+        | "append_url_params"
+        | "concurrent_download"
+        | "sub_only"
+        | "mp4_real_time_decryption"
+        | "allow_hls_multi_ext_map"
+        | "live_perform_as_vod"
+        | "live_real_time_merge"
+        | "live_pipe_mux"
+        | "live_fix_vtt_by_audio"
+        | "disable_update_check" => Some("False".to_string()),
+        "del_after_done"
+        | "check_segments_count"
+        | "write_meta_json"
+        | "auto_subtitle_fix"
+        | "live_keep_segments"
+        | "use_system_proxy" => Some("True".to_string()),
+        "thread_count" => std::thread::available_parallelism()
+            .ok()
+            .map(|count| count.get().to_string()),
+        "download_retry_count" => Some("3".to_string()),
+        "http_request_timeout" => Some("100".to_string()),
+        "log_level" => Some("INFO".to_string()),
+        "sub_format" => Some("SRT".to_string()),
+        "decryption_engine" => Some("MP4FORGE".to_string()),
+        "live_take_count" => Some("16".to_string()),
+        _ => None,
+    }
 }
 
 fn version_text() -> String {
@@ -2153,50 +2539,118 @@ fn version_text() -> String {
 
 fn mux_help() -> String {
     [
-        "mux-after-done grammar:",
-        "  -M <format>",
-        "  -M <format>:muxer=<ffmpeg|mkvmerge|mp4forge>:fallback_muxer=<ffmpeg|none>:bin_path=<path|auto>:keep=<true|false>:skip_sub=<true|false>",
-        "  formats: mp4, mkv, ts",
-        "  defaults: muxer=ffmpeg, fallback_muxer=none, bin_path=auto, keep=false, skip_sub=false",
+        "When all works is done, try to mux the downloaded streams. OPTIONS is a colon separated list of:",
+        "",
+        "* format=FORMAT: set container. mkv, mp4, ts",
+        "* muxer=MUXER: set muxer. ffmpeg, mkvmerge, mp4forge (Default: ffmpeg)",
+        "* fallback_muxer=MUXER: set fallback muxer for mp4forge. ffmpeg, none (Default: none)",
+        "* bin_path=PATH: set binary file path. (Default: auto)",
+        "* skip_sub=BOOL: set whether or not skip subtitle files (Default: false)",
+        "* keep=BOOL: set whether or not keep files. true, false (Default: false)",
+        "",
+        "Examples: ",
+        "# mux to mp4",
+        "-M format=mp4",
+        "# use mkvmerge, auto detect bin path",
+        "-M format=mkv:muxer=mkvmerge",
+        "# use mkvmerge, set bin path",
+        "-M format=mkv:muxer=mkvmerge:bin_path=\"C\\:\\Program Files\\MKVToolNix\\mkvmerge.exe\"",
+        "# use mp4forge, fall back to ffmpeg if mp4forge cannot mux the selected streams",
+        "-M format=mp4:muxer=mp4forge:fallback_muxer=ffmpeg",
+        "",
     ]
     .join("\n")
 }
 
 fn import_help() -> String {
     [
-        "mux-import grammar:",
-        "  --mux-import <path>",
-        "  --mux-import path=<path>:lang=<language>:name=<track name>",
-        "  escape literal colons inside complex values as \\:",
-        "  mux imports require --mux-after-done",
+        "When MuxAfterDone enabled, allow to import local media files. OPTIONS is a colon separated list of:",
+        "",
+        "* path=PATH: set file path",
+        "* lang=CODE: set media language code (not required)",
+        "* name=NAME: set description (not required)",
+        "",
+        "Examples: ",
+        "# import subtitle",
+        "--mux-import path=en-US.srt:lang=eng:name=\"English (Original)\"",
+        "# import audio and subtitle",
+        "--mux-import path=\"D\\:\\media\\atmos.m4a\":lang=eng:name=\"English Description Audio\" --mux-import path=\"D\\:\\media\\eng.vtt\":lang=eng:name=\"English (Description)\"",
     ]
     .join("\n")
 }
 
-fn selection_help() -> String {
+fn select_video_help() -> String {
     [
-        "selection filter grammar:",
-        "  all | best | bestN | worst | worstN",
-        "  for=<choice>:id=<pattern>:lang=<pattern>:name=<pattern>:codecs=<pattern>:res=<pattern>:frame=<pattern>:channel=<pattern>:range=<pattern>:url=<pattern>",
-        "  segsMin=<n>:segsMax=<n>:plistDurMin=<1h2m3s>:plistDurMax=<1h2m3s>:bwMin=<kbps>:bwMax=<kbps>:role=<role>",
-        "  escape literal colons inside complex values as \\:",
+        "Select video streams by regular expressions. OPTIONS is a colon separated list of:",
+        "",
+        "id=REGEX:lang=REGEX:name=REGEX:codecs=REGEX:res=REGEX:frame=REGEX",
+        "segsMin=number:segsMax=number:ch=REGEX:range=REGEX:url=REGEX",
+        "plistDurMin=hms:plistDurMax=hms:bwMin=int:bwMax=int:role=string:for=FOR",
+        "",
+        "* for=FOR: Select type. best[number], worst[number], all (Default: best)",
+        "",
+        "Examples: ",
+        "# select best video",
+        "-sv best",
+        "# select 4K+HEVC video",
+        "-sv res=\"3840*\":codecs=hvc1:for=best",
+        "# Select best video with duration longer than 1 hour 20 minutes 30 seconds",
+        "-sv plistDurMin=\"1h20m30s\":for=best",
+        "-sv role=\"main\":for=best",
+        "# Select video with bandwidth between 800Kbps and 1Mbps",
+        "-sv bwMin=800:bwMax=1000",
+        "",
+    ]
+    .join("\n")
+}
+
+fn select_audio_help() -> String {
+    [
+        "Select audio streams by regular expressions. ref --select-video",
+        "",
+        "Examples: ",
+        "# select all",
+        "-sa all",
+        "# select best eng audio",
+        "-sa lang=en:for=best",
+        "# select best 2, and language is ja or en",
+        "-sa lang=\"ja|en\":for=best2",
+        "-sa role=\"main\":for=best",
+        "",
+    ]
+    .join("\n")
+}
+
+fn select_subtitle_help() -> String {
+    [
+        "Select subtitle streams by regular expressions. ref --select-video",
+        "",
+        "Examples: ",
+        "# select all subs",
+        "-ss all",
+        "# select all subs containing \"English\"",
+        "-ss name=\"English\":for=all",
+        "",
     ]
     .join("\n")
 }
 
 fn range_help() -> String {
     [
-        "custom-range grammar:",
-        "  --custom-range <start-segment>-<end-segment>",
-        "  --custom-range <start-time>-<end-time>",
-        "  time fields use colon-separated duration parts from right to left: seconds, minutes, hours, days",
-        "  an empty start means 0; an empty end means open-ended",
+        "Download only part of the segments when downloading vod content.",
+        "",
+        "Examples: ",
+        "# Download [0,10], a total of 11 segments",
+        "--custom-range 0-10",
+        "# Download subsequent segments starting from index 10",
+        "--custom-range 10-",
+        "# Download the first 100 segments",
+        "--custom-range -99",
+        "# Download content from the 05:00 to 20:00",
+        "--custom-range 05:00-20:00",
+        "",
     ]
     .join("\n")
-}
-
-fn no_help_text(topic: &str) -> String {
-    format!("No extended help is available for {topic}.")
 }
 
 fn cli_error_text(error: &Error, _language: Option<UiLanguage>) -> String {

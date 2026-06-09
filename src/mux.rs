@@ -364,6 +364,7 @@ pub fn plan_ffmpeg_merge(request: FfmpegMergeRequest<'_>) -> Result<MuxCommandPl
     if use_concat_demuxer {
         let concat_list_path = concat_list_path
             .ok_or_else(|| Error::mux("ffmpeg concat demuxer requires a concat list path"))?;
+        let concat_list_path = absolute_output_base_path(concat_list_path)?;
         command.push_str(&format!(
             " -f concat -safe 0 -i \"{}\"",
             concat_list_path.display()

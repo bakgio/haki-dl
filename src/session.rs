@@ -3649,13 +3649,23 @@ async fn write_ffmpeg_concat_list(files: &[PathBuf], path: &Path) -> Result<()> 
     }
     let mut text = String::new();
     for file in files {
-        let escaped = file.to_string_lossy().replace('\'', "'\\''");
+        let absolute = absolute_path(file)?;
+        let normalized = absolute.to_string_lossy().replace('\\', "/");
+        let escaped = normalized.replace('\'', "'\\''");
         text.push_str("file '");
         text.push_str(&escaped);
         text.push_str("'\n");
     }
     tokio::fs::write(path, text).await?;
     Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn should_binary_merge_stream(
