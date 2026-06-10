@@ -1,6 +1,7 @@
 //! CLI option parsing.
 
 use std::io::{IsTerminal, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -600,6 +601,126 @@ pub const CLI_SCHEMA: &[CliOptionSchema] = &[
         CliApiBinding::OptionField,
     ),
     schema_row(
+        "enable_rpc",
+        &["--enable-rpc"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServer::serve",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_listen",
+        &["--rpc-listen"],
+        CliSchemaValueKind::Scalar,
+        "127.0.0.1:6800",
+        "RpcServerBuilder::bind",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_listen_all",
+        &["--rpc-listen-all"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServerBuilder::bind",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_listen_port",
+        &["--rpc-listen-port"],
+        CliSchemaValueKind::Scalar,
+        "6800",
+        "RpcServerBuilder::bind",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_secret",
+        &["--rpc-secret"],
+        CliSchemaValueKind::Scalar,
+        "none",
+        "RpcServerBuilder::secret",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "pause",
+        &["--pause"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServerBuilder::pause_new_downloads",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_user",
+        &["--rpc-user"],
+        CliSchemaValueKind::Scalar,
+        "none",
+        "RpcServerBuilder::basic_auth",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_passwd",
+        &["--rpc-passwd"],
+        CliSchemaValueKind::Scalar,
+        "none",
+        "RpcServerBuilder::basic_auth",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_secure",
+        &["--rpc-secure"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServerBuilder::secure_pem_files",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_certificate",
+        &["--rpc-certificate"],
+        CliSchemaValueKind::Scalar,
+        "none",
+        "RpcServerBuilder::secure_pem_files",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_private_key",
+        &["--rpc-private-key"],
+        CliSchemaValueKind::Scalar,
+        "none",
+        "RpcServerBuilder::secure_pem_files",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_max_request_size",
+        &["--rpc-max-request-size"],
+        CliSchemaValueKind::Scalar,
+        "2M",
+        "RpcServerBuilder::max_request_size",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_allow_origin_all",
+        &["--rpc-allow-origin-all"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServerBuilder::allow_origin_all",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_queue",
+        &["--rpc-queue"],
+        CliSchemaValueKind::Flag,
+        "false",
+        "RpcServerBuilder::queue_enabled",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
+        "rpc_max_concurrent_downloads",
+        &["--rpc-max-concurrent-downloads"],
+        CliSchemaValueKind::Scalar,
+        "4",
+        "RpcServerBuilder::max_concurrent_downloads",
+        CliApiBinding::CliOnly,
+    ),
+    schema_row(
         "help",
         &["-?", "-h", "--help"],
         CliSchemaValueKind::Flag,
@@ -667,9 +788,47 @@ const fn hidden_schema_row(
 #[derive(Clone, Debug)]
 pub enum CliParseResult {
     Request(Box<DownloadRequest>),
-    Help { text: String },
-    MoreHelp { topic: Option<String>, text: String },
-    Version { text: String },
+    Help {
+        text: String,
+    },
+    MoreHelp {
+        topic: Option<String>,
+        text: String,
+    },
+    RpcServer {
+        listen: SocketAddr,
+        secret: Option<String>,
+        pause_new_downloads: bool,
+        rpc_user: Option<String>,
+        rpc_passwd: Option<String>,
+        rpc_secure: bool,
+        rpc_certificate: Option<PathBuf>,
+        rpc_private_key: Option<PathBuf>,
+        max_request_size: usize,
+        allow_origin_all: bool,
+        queue_enabled: bool,
+        max_concurrent_downloads: usize,
+    },
+    Version {
+        text: String,
+    },
+}
+
+#[cfg(feature = "rpc")]
+#[derive(Clone, Debug)]
+struct RpcRunConfig {
+    listen: SocketAddr,
+    secret: Option<String>,
+    pause_new_downloads: bool,
+    rpc_user: Option<String>,
+    rpc_passwd: Option<String>,
+    rpc_secure: bool,
+    rpc_certificate: Option<PathBuf>,
+    rpc_private_key: Option<PathBuf>,
+    max_request_size: usize,
+    allow_origin_all: bool,
+    queue_enabled: bool,
+    max_concurrent_downloads: usize,
 }
 
 /// Parses CLI arguments after the executable name.
@@ -726,6 +885,9 @@ where
         Ok(CliParseResult::MoreHelp { text, .. }) => {
             println!("{text}");
             ExitCode::SUCCESS
+        }
+        Ok(result @ CliParseResult::RpcServer { .. }) => {
+            run_rpc_server(result, detected_language).await
         }
         Ok(CliParseResult::Help { text }) => {
             println!("{text}");
@@ -837,6 +999,104 @@ fn render_standalone_cli_error(error: &Error, language: Option<UiLanguage>) {
     }
 }
 
+#[cfg(feature = "rpc")]
+async fn run_rpc_server(result: CliParseResult, language: Option<UiLanguage>) -> ExitCode {
+    let CliParseResult::RpcServer {
+        listen,
+        secret,
+        pause_new_downloads,
+        rpc_user,
+        rpc_passwd,
+        rpc_secure,
+        rpc_certificate,
+        rpc_private_key,
+        max_request_size,
+        allow_origin_all,
+        queue_enabled,
+        max_concurrent_downloads,
+    } = result
+    else {
+        render_standalone_cli_error(
+            &Error::config("invalid JSON-RPC server configuration"),
+            language,
+        );
+        return ExitCode::from(2);
+    };
+    let config = RpcRunConfig {
+        listen,
+        secret,
+        pause_new_downloads,
+        rpc_user,
+        rpc_passwd,
+        rpc_secure,
+        rpc_certificate,
+        rpc_private_key,
+        max_request_size,
+        allow_origin_all,
+        queue_enabled,
+        max_concurrent_downloads,
+    };
+    let RpcRunConfig {
+        listen,
+        secret,
+        pause_new_downloads,
+        rpc_user,
+        rpc_passwd,
+        rpc_secure,
+        rpc_certificate,
+        rpc_private_key,
+        max_request_size,
+        allow_origin_all,
+        queue_enabled,
+        max_concurrent_downloads,
+    } = config;
+    let mut builder = crate::rpc::RpcServer::builder()
+        .bind(listen)
+        .max_request_size(max_request_size)
+        .allow_origin_all(allow_origin_all)
+        .queue_enabled(queue_enabled)
+        .max_concurrent_downloads(max_concurrent_downloads);
+    if rpc_secure {
+        match (rpc_certificate, rpc_private_key) {
+            (Some(certificate), Some(private_key)) => {
+                builder = builder.secure_pem_files(certificate, private_key);
+            }
+            _ => {
+                render_standalone_cli_error(
+                    &Error::config("--rpc-secure requires --rpc-certificate and --rpc-private-key"),
+                    language,
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if pause_new_downloads {
+        builder = builder.pause_new_downloads(true);
+    }
+    if let Some(secret) = secret {
+        builder = builder.secret(secret);
+    }
+    if let (Some(user), Some(passwd)) = (rpc_user, rpc_passwd) {
+        builder = builder.basic_auth(user, passwd);
+    }
+    match builder.build().serve().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            render_standalone_cli_error(&error, language);
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(not(feature = "rpc"))]
+async fn run_rpc_server(_result: CliParseResult, language: Option<UiLanguage>) -> ExitCode {
+    render_standalone_cli_error(
+        &Error::config("JSON-RPC server support is not enabled in this build"),
+        language,
+    );
+    ExitCode::from(2)
+}
+
 fn is_missing_input_error(error: &Error) -> bool {
     matches!(error, Error::Config { message } if message == "input is required")
 }
@@ -879,6 +1139,21 @@ struct Parser {
     index: usize,
     input: Option<String>,
     options: DownloadOptions,
+    rpc_enabled: bool,
+    rpc_listen: Option<SocketAddr>,
+    rpc_listen_all: bool,
+    rpc_listen_port: u16,
+    rpc_secret: Option<String>,
+    rpc_pause_new_downloads: bool,
+    rpc_user: Option<String>,
+    rpc_passwd: Option<String>,
+    rpc_secure: bool,
+    rpc_certificate: Option<PathBuf>,
+    rpc_private_key: Option<PathBuf>,
+    rpc_max_request_size: usize,
+    rpc_allow_origin_all: bool,
+    rpc_queue_enabled: bool,
+    rpc_max_concurrent_downloads: usize,
 }
 
 impl Parser {
@@ -893,6 +1168,21 @@ impl Parser {
             index: 0,
             input: None,
             options,
+            rpc_enabled: false,
+            rpc_listen: None,
+            rpc_listen_all: false,
+            rpc_listen_port: 6800,
+            rpc_secret: None,
+            rpc_pause_new_downloads: false,
+            rpc_user: None,
+            rpc_passwd: None,
+            rpc_secure: false,
+            rpc_certificate: None,
+            rpc_private_key: None,
+            rpc_max_request_size: 2 * 1024 * 1024,
+            rpc_allow_origin_all: false,
+            rpc_queue_enabled: false,
+            rpc_max_concurrent_downloads: 4,
         }
     }
 
@@ -1156,11 +1446,136 @@ impl Parser {
                     self.options.live_take_count =
                         parse_i32(&self.value(token, inline_value)?, "--live-take-count")?
                 }
+                "--enable-rpc" => self.rpc_enabled = self.bool_value(inline_value)?,
+                "--rpc-listen" => {
+                    self.rpc_listen = Some(parse_socket_addr(
+                        &self.value(token, inline_value)?,
+                        "--rpc-listen",
+                    )?)
+                }
+                "--rpc-listen-all" => {
+                    self.rpc_listen_all = self.bool_value(inline_value)?;
+                }
+                "--rpc-listen-port" => {
+                    self.rpc_listen_port =
+                        parse_port(&self.value(token, inline_value)?, "--rpc-listen-port")?;
+                }
+                "--rpc-secret" => {
+                    let value = self.value(token, inline_value)?;
+                    self.rpc_secret = if value.is_empty() { None } else { Some(value) };
+                }
+                "--pause" => {
+                    self.rpc_pause_new_downloads = self.bool_value(inline_value)?;
+                    if self.rpc_pause_new_downloads {
+                        self.rpc_queue_enabled = true;
+                    }
+                }
+                "--rpc-user" => {
+                    let value = self.value(token, inline_value)?;
+                    self.rpc_user = if value.is_empty() { None } else { Some(value) };
+                }
+                "--rpc-passwd" => {
+                    let value = self.value(token, inline_value)?;
+                    self.rpc_passwd = if value.is_empty() { None } else { Some(value) };
+                }
+                "--rpc-secure" => {
+                    self.rpc_secure = self.bool_value(inline_value)?;
+                }
+                "--rpc-certificate" => {
+                    let value = self.value(token, inline_value)?;
+                    self.rpc_certificate = if value.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
+                "--rpc-private-key" => {
+                    let value = self.value(token, inline_value)?;
+                    self.rpc_private_key = if value.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
+                "--rpc-max-request-size" => {
+                    self.rpc_max_request_size = parse_size_bytes(
+                        &self.value(token, inline_value)?,
+                        "--rpc-max-request-size",
+                    )?;
+                }
+                "--rpc-allow-origin-all" => {
+                    self.rpc_allow_origin_all = self.bool_value(inline_value)?;
+                }
+                "--rpc-queue" => {
+                    self.rpc_queue_enabled = self.bool_value(inline_value)?;
+                }
+                "--rpc-max-concurrent-downloads" => {
+                    self.rpc_max_concurrent_downloads = parse_usize(
+                        &self.value(token, inline_value)?,
+                        "--rpc-max-concurrent-downloads",
+                    )?
+                    .max(1);
+                    self.rpc_queue_enabled = true;
+                }
                 value if value.starts_with('-') => {
                     return Err(Error::config(format!("unknown option {value}")));
                 }
                 value => self.set_input(value.to_string(), inline_value)?,
             }
+        }
+
+        if self.rpc_enabled {
+            if self.input.is_some() {
+                return Err(Error::config(
+                    "--enable-rpc does not accept a download input",
+                ));
+            }
+            if self.rpc_user.is_some() != self.rpc_passwd.is_some() {
+                return Err(Error::config(
+                    "--rpc-user and --rpc-passwd must be provided together",
+                ));
+            }
+            if self.rpc_secure && (self.rpc_certificate.is_none() || self.rpc_private_key.is_none())
+            {
+                return Err(Error::config(
+                    "--rpc-secure requires --rpc-certificate and --rpc-private-key",
+                ));
+            }
+            if !self.rpc_secure
+                && (self.rpc_certificate.is_some() || self.rpc_private_key.is_some())
+            {
+                return Err(Error::config(
+                    "--rpc-certificate and --rpc-private-key require --rpc-secure",
+                ));
+            }
+            return Ok(CliParseResult::RpcServer {
+                listen: self
+                    .rpc_listen
+                    .unwrap_or_else(|| rpc_bind_addr(self.rpc_listen_all, self.rpc_listen_port)),
+                secret: self.rpc_secret,
+                pause_new_downloads: self.rpc_pause_new_downloads,
+                rpc_user: self.rpc_user,
+                rpc_passwd: self.rpc_passwd,
+                rpc_secure: self.rpc_secure,
+                rpc_certificate: self.rpc_certificate,
+                rpc_private_key: self.rpc_private_key,
+                max_request_size: self.rpc_max_request_size,
+                allow_origin_all: self.rpc_allow_origin_all,
+                queue_enabled: self.rpc_queue_enabled,
+                max_concurrent_downloads: self.rpc_max_concurrent_downloads,
+            });
+        }
+
+        if self.rpc_pause_new_downloads
+            || self.rpc_user.is_some()
+            || self.rpc_passwd.is_some()
+            || self.rpc_secure
+            || self.rpc_certificate.is_some()
+            || self.rpc_private_key.is_some()
+        {
+            return Err(Error::config(
+                "--pause, --rpc-user, --rpc-passwd, --rpc-secure, --rpc-certificate, and --rpc-private-key require --enable-rpc",
+            ));
         }
 
         let input = match self.input {
@@ -1314,6 +1729,63 @@ fn parse_i64(value: &str, option: &str) -> Result<i64> {
     value
         .parse::<i64>()
         .map_err(|_| Error::config(format!("{option} must be an integer")))
+}
+
+fn parse_usize(value: &str, option: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .map_err(|_| Error::config(format!("{option} must be a positive integer")))
+}
+
+fn parse_port(value: &str, option: &str) -> Result<u16> {
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| Error::config(format!("{option} must be a TCP port")))?;
+    if port < 1024 {
+        return Err(Error::config(format!("{option} must be at least 1024")));
+    }
+    Ok(port)
+}
+
+fn parse_socket_addr(value: &str, option: &str) -> Result<SocketAddr> {
+    value
+        .parse::<SocketAddr>()
+        .map_err(|error| Error::config(format!("{option} must be a host:port address: {error}")))
+}
+
+fn rpc_bind_addr(listen_all: bool, port: u16) -> SocketAddr {
+    if listen_all {
+        SocketAddr::from(([0, 0, 0, 0], port))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+}
+
+fn parse_size_bytes(value: &str, option: &str) -> Result<usize> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::config(format!("{option} must not be empty")));
+    }
+    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return parse_usize(trimmed, option);
+    }
+    let unit = trimmed
+        .chars()
+        .last()
+        .ok_or_else(|| Error::config(format!("{option} must not be empty")))?;
+    let number = trimmed
+        .get(..trimmed.len().saturating_sub(unit.len_utf8()))
+        .ok_or_else(|| Error::config(format!("{option} is invalid")))?;
+    let multiplier = match unit.to_ascii_uppercase() {
+        'K' => 1024_usize,
+        'M' => 1024_usize * 1024_usize,
+        'G' => 1024_usize * 1024_usize * 1024_usize,
+        _ => return Err(Error::config(format!("{option} unit must be K, M, or G"))),
+    };
+    let parsed = parse_usize(number, option)?;
+    parsed
+        .checked_mul(multiplier)
+        .ok_or_else(|| Error::config(format!("{option} is too large")))
 }
 
 fn parse_f64(value: &str, option: &str) -> Result<f64> {
@@ -2265,9 +2737,24 @@ fn help_option_order(canonical: &str) -> usize {
         "ad_keyword" => 60,
         "disable_update_check" => 61,
         "allow_hls_multi_ext_map" => 62,
-        "morehelp" => 63,
-        "help" => 64,
-        "version" => 65,
+        "enable_rpc" => 63,
+        "rpc_listen" => 64,
+        "rpc_listen_all" => 65,
+        "rpc_listen_port" => 66,
+        "rpc_secret" => 67,
+        "pause" => 68,
+        "rpc_user" => 69,
+        "rpc_passwd" => 70,
+        "rpc_secure" => 71,
+        "rpc_certificate" => 72,
+        "rpc_private_key" => 73,
+        "rpc_max_request_size" => 74,
+        "rpc_allow_origin_all" => 75,
+        "rpc_queue" => 76,
+        "rpc_max_concurrent_downloads" => 77,
+        "morehelp" => 78,
+        "help" => 79,
+        "version" => 80,
         _ => usize::MAX,
     }
 }
@@ -2376,6 +2863,15 @@ fn help_option_value_name(row: &CliOptionSchema) -> Option<&'static str> {
         "live_record_limit" => Some("<HH:mm:ss>"),
         "live_wait_time" => Some("<SEC>"),
         "live_take_count" => Some("<NUM>"),
+        "rpc_listen" => Some("<HOST:PORT>"),
+        "rpc_listen_port" => Some("<PORT>"),
+        "rpc_secret" => Some("<SECRET>"),
+        "rpc_user" => Some("<USER>"),
+        "rpc_passwd" => Some("<PASSWD>"),
+        "rpc_certificate" => Some("<FILE>"),
+        "rpc_private_key" => Some("<FILE>"),
+        "rpc_max_request_size" => Some("<SIZE>"),
+        "rpc_max_concurrent_downloads" => Some("<NUM>"),
         "select_video" | "select_audio" | "select_subtitle" | "drop_video" | "drop_audio"
         | "drop_subtitle" => Some("<OPTIONS>"),
         "ad_keyword" => Some("<REG>"),
@@ -2483,6 +2979,21 @@ fn help_option_description(row: &CliOptionSchema) -> String {
         "live_take_count" => {
             "Manually set the number of segments downloaded for the first time when recording live"
         }
+        "enable_rpc" => "Start the JSON-RPC server instead of a download session",
+        "rpc_listen" => "Set the JSON-RPC listen address",
+        "rpc_listen_all" => "Listen for JSON-RPC requests on all network interfaces",
+        "rpc_listen_port" => "Set the JSON-RPC listen port",
+        "rpc_secret" => "Set the JSON-RPC token secret",
+        "pause" => "Start JSON-RPC queued downloads paused by default",
+        "rpc_user" => "Set deprecated JSON-RPC Basic auth user",
+        "rpc_passwd" => "Set deprecated JSON-RPC Basic auth password",
+        "rpc_secure" => "Encrypt JSON-RPC transport with TLS",
+        "rpc_certificate" => "Use a PEM certificate file for the JSON-RPC server",
+        "rpc_private_key" => "Use a PEM private key file for the JSON-RPC server",
+        "rpc_max_request_size" => "Set the maximum JSON-RPC request size",
+        "rpc_allow_origin_all" => "Add Access-Control-Allow-Origin: * to JSON-RPC HTTP responses",
+        "rpc_queue" => "Enable the optional JSON-RPC download queue",
+        "rpc_max_concurrent_downloads" => "Set the maximum queued downloads that may run at once",
         "help" => "Show help and usage information",
         "version" => "Show version information",
         "morehelp" => "Set more help info about one option",
@@ -2513,6 +3024,12 @@ fn help_option_default(row: &CliOptionSchema) -> Option<String> {
         | "live_real_time_merge"
         | "live_pipe_mux"
         | "live_fix_vtt_by_audio"
+        | "enable_rpc"
+        | "rpc_listen_all"
+        | "rpc_allow_origin_all"
+        | "rpc_secure"
+        | "pause"
+        | "rpc_queue"
         | "disable_update_check" => Some("False".to_string()),
         "del_after_done"
         | "check_segments_count"
@@ -2529,6 +3046,10 @@ fn help_option_default(row: &CliOptionSchema) -> Option<String> {
         "sub_format" => Some("SRT".to_string()),
         "decryption_engine" => Some("MP4FORGE".to_string()),
         "live_take_count" => Some("16".to_string()),
+        "rpc_listen" => Some("127.0.0.1:6800".to_string()),
+        "rpc_listen_port" => Some("6800".to_string()),
+        "rpc_max_request_size" => Some("2M".to_string()),
+        "rpc_max_concurrent_downloads" => Some("4".to_string()),
         _ => None,
     }
 }

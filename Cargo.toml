@@ -20,13 +20,28 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["cli", "mp4forge"]
 cli = ["dep:crossterm"]
 mp4forge = ["dep:mp4forge"]
+rpc = [
+    "dep:axum",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tokio-rustls",
+    "dep:tower-service",
+]
 serde = ["dep:serde"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"], optional = true }
+hyper = { version = "1.10.1", default-features = false, features = ["http1", "server"], optional = true }
+hyper-util = { version = "0.1.20", default-features = false, features = ["tokio"], optional = true }
+tokio-rustls = { version = "0.26.4", optional = true }
+tower-service = { version = "0.3.3", optional = true }
 roxmltree = "0.21.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "http2", "gzip", "deflate", "brotli", "zstd", "socks"] }
-tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "sync", "time"] }
+tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros", "fs", "io-util", "net", "process", "sync", "time"] }
 regex = "1"
 encoding_rs = "0.8"
 flate2 = "1"
