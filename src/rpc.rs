@@ -1996,20 +1996,12 @@ fn parse_jsonrpc_body(body: &[u8]) -> RpcCallResult<Value> {
 
 async fn handle_jsonrpc_value(state: &RpcAppState, value: Value, auth: RpcRequestAuth) -> Value {
     match value {
-        Value::Array(items) => {
-            if items.is_empty() {
-                return Value::Object(response_value(JsonRpcResponse::error(
-                    None,
-                    RpcError::invalid_request("empty batch request"),
-                )));
-            }
-            Value::Array(
-                handle_jsonrpc_batch(state, items, auth)
-                    .await
-                    .into_iter()
-                    .collect::<Vec<_>>(),
-            )
-        }
+        Value::Array(items) => Value::Array(
+            handle_jsonrpc_batch(state, items, auth)
+                .await
+                .into_iter()
+                .collect::<Vec<_>>(),
+        ),
         Value::Object(_) => Value::Object(handle_jsonrpc_object(state, value, auth).await),
         _ => Value::Object(response_value(JsonRpcResponse::error(
             None,
@@ -2025,9 +2017,11 @@ async fn handle_jsonrpc_batch(
 ) -> Vec<Value> {
     let mut responses = Vec::with_capacity(items.len());
     for item in items {
-        responses.push(Value::Object(
-            handle_jsonrpc_object(state, item, auth).await,
-        ));
+        if item.is_object() {
+            responses.push(Value::Object(
+                handle_jsonrpc_object(state, item, auth).await,
+            ));
+        }
     }
     responses
 }
@@ -2168,7 +2162,7 @@ fn strip_auth(
 fn is_public_method(method: &str) -> bool {
     matches!(
         method,
-        METHOD_SYSTEM_LIST_METHODS | METHOD_SYSTEM_LIST_NOTIFICATIONS
+        METHOD_SYSTEM_LIST_METHODS | METHOD_SYSTEM_LIST_NOTIFICATIONS | METHOD_SYSTEM_MULTICALL
     )
 }
 
@@ -2345,7 +2339,7 @@ fn remove_download_result(manager: &RpcSessionManager, params: &[Value]) -> RpcC
 async fn system_multicall(
     state: &RpcAppState,
     params: &[Value],
-    auth: RpcRequestAuth,
+    _auth: RpcRequestAuth,
 ) -> RpcCallResult<Value> {
     let calls = params
         .first()
@@ -2353,28 +2347,44 @@ async fn system_multicall(
         .ok_or_else(|| RpcError::invalid_params("system.multicall requires a call array"))?;
     let mut results = Vec::with_capacity(calls.len());
     for call in calls {
-        let call = call
-            .as_object()
-            .ok_or_else(|| RpcError::invalid_params("system.multicall entries must be objects"))?;
-        let method = call
+        let Some(call) = call.as_object() else {
+            results.push(multicall_fault(RpcError::invalid_params(
+                "system.multicall entries must be objects",
+            )));
+            continue;
+        };
+        let Some(method) = call
             .get("methodName")
             .or_else(|| call.get("method"))
             .and_then(Value::as_str)
-            .ok_or_else(|| RpcError::invalid_params("system.multicall entry method is required"))?;
+        else {
+            results.push(multicall_fault(RpcError::invalid_params(
+                "system.multicall entry method is required",
+            )));
+            continue;
+        };
+        if method == METHOD_SYSTEM_MULTICALL {
+            results.push(multicall_fault(RpcError::invalid_params(
+                "Recursive system.multicall forbidden.",
+            )));
+            continue;
+        }
         let params = call.get("params").cloned();
         let request = JsonRpcRequest {
             id: None,
             method: method.to_string(),
             params,
         };
-        match Box::pin(process_request(state, request, auth)).await {
+        match Box::pin(process_request(state, request, RpcRequestAuth::default())).await {
             Ok(value) => results.push(Value::Array(vec![value])),
-            Err(error) => {
-                results.push(json!({ "faultCode": error.code, "faultString": error.message }))
-            }
+            Err(error) => results.push(multicall_fault(error)),
         }
     }
     Ok(Value::Array(results))
+}
+
+fn multicall_fault(error: RpcError) -> Value {
+    json!({ "faultCode": error.code, "faultString": error.message })
 }
 
 fn parse_key_filter(value: &Value) -> RpcCallResult<Vec<String>> {
