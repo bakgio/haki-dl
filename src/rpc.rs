@@ -11,8 +11,8 @@
 //! spelling, so `saveDir`, `save-dir`, and `save_dir` all map to the same
 //! setting.
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,7 @@ const METHOD_FORCE_PAUSE_ALL: &str = "haki.forcePauseAll";
 const METHOD_UNPAUSE: &str = "haki.unpause";
 const METHOD_UNPAUSE_ALL: &str = "haki.unpauseAll";
 const METHOD_CHANGE_POSITION: &str = "haki.changePosition";
+const METHOD_CHANGE_URI: &str = "haki.changeUri";
 const METHOD_CHANGE_OPTION: &str = "haki.changeOption";
 const METHOD_GET_GLOBAL_OPTION: &str = "haki.getGlobalOption";
 const METHOD_CHANGE_GLOBAL_OPTION: &str = "haki.changeGlobalOption";
@@ -367,6 +368,26 @@ impl RpcServerBuilder {
         self
     }
 
+    /// Sets whether the server listens on all IPv4 interfaces.
+    ///
+    /// The current listen port is preserved. When disabled, the server listens
+    /// on `127.0.0.1`.
+    pub fn rpc_listen_all(mut self, listen_all: bool) -> Self {
+        let ip = if listen_all {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        };
+        self.bind = SocketAddr::new(ip, self.bind.port());
+        self
+    }
+
+    /// Sets the JSON-RPC listen port while preserving the current listen host.
+    pub fn rpc_listen_port(mut self, port: u16) -> Self {
+        self.bind.set_port(port);
+        self
+    }
+
     /// Parses and sets the listen address.
     pub fn bind_str(mut self, bind: &str) -> Result<Self> {
         self.bind = bind
@@ -597,7 +618,7 @@ impl RpcSessionManager {
                 .prepare(request)
                 .map_err(|error| RpcError::invalid_params(error.to_string()))?;
 
-            self.insert_state(RpcDownloadState::new_with_options(RpcDownloadInit {
+            let mut state = RpcDownloadState::new_with_options(RpcDownloadInit {
                 gid: gid.clone(),
                 input,
                 options,
@@ -606,13 +627,16 @@ impl RpcSessionManager {
                 cancellation_token,
                 status: RpcDownloadStatus::Active,
                 queue_position: self.next_queue_position(),
-            }))?;
+            });
+            state.run_generation = state.run_generation.saturating_add(1);
+            let run_generation = state.run_generation;
+            self.insert_state(state)?;
             self.send_lifecycle(NOTIFY_START, &gid);
             let manager = self.clone();
             let gid_for_task = gid.clone();
             tokio::spawn(async move {
                 let result = Box::pin(session.start()).await;
-                manager.finish_download(&gid_for_task, result);
+                manager.finish_download(&gid_for_task, run_generation, result);
             });
             return Ok(gid);
         }
@@ -744,9 +768,17 @@ impl RpcSessionManager {
     /// Returns the URI list for one download.
     pub fn get_uris(&self, gid: &str) -> RpcCallResult<Value> {
         let state = self.find_state(gid)?;
+        if state.status.is_terminal() {
+            return Err(RpcError::invalid_params("no uri data for gid"));
+        }
+        let uri_status = if state.status == RpcDownloadStatus::Active {
+            "used"
+        } else {
+            "waiting"
+        };
         Ok(Value::Array(vec![json!({
             "uri": state.input,
-            "status": "used",
+            "status": uri_status,
         })]))
     }
 
@@ -758,8 +790,24 @@ impl RpcSessionManager {
 
     /// Returns server entries for one download.
     pub fn get_servers(&self, gid: &str) -> RpcCallResult<Value> {
-        self.find_state(gid)?;
-        Ok(Value::Array(Vec::new()))
+        let state = self.find_state(gid)?;
+        if state.status != RpcDownloadStatus::Active {
+            return Err(RpcError::invalid_params("no active download for gid"));
+        }
+        if !state.input.starts_with("http://") && !state.input.starts_with("https://") {
+            return Ok(Value::Array(vec![json!({
+                "index": "1",
+                "servers": [],
+            })]));
+        }
+        Ok(Value::Array(vec![json!({
+            "index": "1",
+            "servers": [{
+                "uri": state.input,
+                "currentUri": state.input,
+                "downloadSpeed": state.download_speed.to_string(),
+            }],
+        })]))
     }
 
     /// Returns the option snapshot supplied when the download was added.
@@ -772,6 +820,11 @@ impl RpcSessionManager {
     pub fn remove(&self, gid: &str) -> RpcCallResult<String> {
         let mut states = self.lock_states()?;
         let state = find_state_mut(&mut states, gid)?;
+        if state.status.is_terminal() {
+            return Err(RpcError::invalid_params(
+                "download result cannot be removed",
+            ));
+        }
         let was_active = state.status == RpcDownloadStatus::Active;
         state.cancellation_token.cancel();
         state.status = RpcDownloadStatus::Removed;
@@ -785,26 +838,37 @@ impl RpcSessionManager {
         Ok(gid)
     }
 
-    /// Pauses a queued download. Active downloads are not paused because haki-dl
-    /// sessions are whole-download jobs; use remove and add again for active work.
+    /// Pauses a queued or active download.
     pub fn pause(&self, gid: &str) -> RpcCallResult<String> {
         let mut states = self.lock_states()?;
-        let state = find_state_mut(&mut states, gid)?;
-        match state.status {
-            RpcDownloadStatus::Waiting => {
-                state.status = RpcDownloadStatus::Paused;
-                state.updated_at_ms = now_ms();
-                let gid = state.gid.clone();
-                drop(states);
-                self.send_lifecycle(NOTIFY_PAUSE, &gid);
-                Ok(gid)
+        let actual_gid = find_state(&states, gid)?.gid.clone();
+        let mut active_token = None;
+        {
+            let state = states
+                .get_mut(&actual_gid)
+                .ok_or_else(|| RpcError::invalid_params("gid not found"))?;
+            match state.status {
+                RpcDownloadStatus::Waiting | RpcDownloadStatus::Active => {
+                    if state.status == RpcDownloadStatus::Active {
+                        active_token = Some(state.cancellation_token.clone());
+                        state.cancellation_token = CancellationToken::new();
+                    }
+                    state.status = RpcDownloadStatus::Paused;
+                    state.updated_at_ms = now_ms();
+                }
+                RpcDownloadStatus::Paused => {
+                    return Err(RpcError::invalid_params("download cannot be paused"));
+                }
+                _ => return Err(RpcError::invalid_params("download cannot be paused")),
             }
-            RpcDownloadStatus::Paused => Ok(state.gid.clone()),
-            RpcDownloadStatus::Active => Err(RpcError::invalid_params(
-                "active downloads cannot be paused; remove and add again",
-            )),
-            _ => Err(RpcError::invalid_params("download is not queued")),
         }
+        move_queued_state_to_front(&mut states, &actual_gid);
+        drop(states);
+        if let Some(token) = active_token {
+            token.cancel();
+        }
+        self.send_lifecycle(NOTIFY_PAUSE, &actual_gid);
+        Ok(actual_gid)
     }
 
     /// Resumes a paused queued download.
@@ -820,23 +884,36 @@ impl RpcSessionManager {
                 self.start_waiting_downloads();
                 Ok(gid)
             }
-            RpcDownloadStatus::Waiting => Ok(state.gid.clone()),
             _ => Err(RpcError::invalid_params("download is not paused")),
         }
     }
 
-    /// Pauses all queued downloads.
+    /// Pauses all queued or active downloads.
     pub fn pause_all(&self) -> RpcCallResult<String> {
         let mut paused = Vec::new();
+        let mut active_tokens = Vec::new();
         let mut states = self.lock_states()?;
         for state in states.values_mut() {
-            if state.status == RpcDownloadStatus::Waiting {
-                state.status = RpcDownloadStatus::Paused;
-                state.updated_at_ms = now_ms();
-                paused.push(state.gid.clone());
+            match state.status {
+                RpcDownloadStatus::Waiting => {
+                    state.status = RpcDownloadStatus::Paused;
+                    state.updated_at_ms = now_ms();
+                    paused.push(state.gid.clone());
+                }
+                RpcDownloadStatus::Active => {
+                    active_tokens.push(state.cancellation_token.clone());
+                    state.cancellation_token = CancellationToken::new();
+                    state.status = RpcDownloadStatus::Paused;
+                    state.updated_at_ms = now_ms();
+                    paused.push(state.gid.clone());
+                }
+                _ => {}
             }
         }
         drop(states);
+        for token in active_tokens {
+            token.cancel();
+        }
         for gid in paused {
             self.send_lifecycle(NOTIFY_PAUSE, &gid);
         }
@@ -895,17 +972,74 @@ impl RpcSessionManager {
         Ok(target)
     }
 
-    /// Changes options for a queued download before it starts.
-    pub fn change_option(&self, gid: &str, options_value: &Value) -> RpcCallResult<String> {
-        let object = options_value
-            .as_object()
-            .ok_or_else(|| RpcError::invalid_params("changeOption requires an options object"))?;
+    /// Replaces the single source URI for a queued or paused download.
+    pub fn change_uri(
+        &self,
+        gid: &str,
+        file_index: usize,
+        del_uris: &[String],
+        add_uris: &[String],
+        position: Option<i64>,
+    ) -> RpcCallResult<Value> {
+        if file_index != 1 {
+            return Err(RpcError::invalid_params("fileIndex is out of range"));
+        }
+        if position.is_some_and(|position| position != 0) {
+            return Err(RpcError::invalid_params(
+                "haki.changeUri supports only the single source URI position",
+            ));
+        }
+        if add_uris.len() > 1 {
+            return Err(RpcError::invalid_params(
+                "haki.changeUri supports exactly one added URI",
+            ));
+        }
+        if add_uris.first().is_some_and(|uri| uri.trim().is_empty()) {
+            return Err(RpcError::invalid_params("URI must not be empty"));
+        }
+
         let mut states = self.lock_states()?;
         let state = find_state_mut(&mut states, gid)?;
         if !state.status.is_queued() {
             return Err(RpcError::invalid_params(
-                "only queued downloads can change options",
+                "haki.changeUri supports queued or paused downloads only",
             ));
+        }
+
+        let deleted = usize::from(del_uris.iter().any(|uri| uri == &state.input));
+        if add_uris.is_empty() {
+            return if deleted == 0 {
+                Ok(json!([0, 0]))
+            } else {
+                Err(RpcError::invalid_params(
+                    "haki.changeUri cannot remove the only source URI",
+                ))
+            };
+        }
+        if deleted == 0 {
+            return Err(RpcError::invalid_params(
+                "haki.changeUri requires deleting the current URI before replacement",
+            ));
+        }
+
+        state.input = add_uris[0].clone();
+        state.updated_at_ms = now_ms();
+        Ok(json!([deleted, 1]))
+    }
+
+    /// Changes options for a queued download or restarts an active download
+    /// with the updated options.
+    pub fn change_option(&self, gid: &str, options_value: &Value) -> RpcCallResult<String> {
+        let object = options_value
+            .as_object()
+            .ok_or_else(|| RpcError::invalid_params("changeOption requires an options object"))?;
+        let mut active_restart = None;
+        let mut active_token = None;
+        let mut states = self.lock_states()?;
+        let state = find_state_mut(&mut states, gid)?;
+        let is_active = state.status == RpcDownloadStatus::Active;
+        if !is_active && !state.status.is_queued() {
+            return Err(RpcError::invalid_params("download cannot change options"));
         }
         let mut selector = Some(state.stream_selector.clone());
         apply_options_object(&mut state.options, &mut selector, object)?;
@@ -915,7 +1049,20 @@ impl RpcSessionManager {
             .options_snapshot
             .extend(sanitize_options_snapshot(object.clone()));
         state.updated_at_ms = now_ms();
-        Ok(state.gid.clone())
+        if is_active {
+            active_token = Some(state.cancellation_token.clone());
+            state.cancellation_token = CancellationToken::new();
+            state.run_generation = state.run_generation.saturating_add(1);
+            active_restart = Some(RpcQueuedStart::from_state(state));
+        }
+        drop(states);
+        if let Some(token) = active_token {
+            token.cancel();
+        }
+        if let Some(start) = active_restart {
+            self.spawn_download(start);
+        }
+        Ok("OK".to_string())
     }
 
     /// Removes one retained completed, failed, or cancelled result.
@@ -932,7 +1079,7 @@ impl RpcSessionManager {
             ));
         }
         states.remove(&actual_gid);
-        Ok(actual_gid)
+        Ok("OK".to_string())
     }
 
     /// Removes all retained non-active results.
@@ -1048,6 +1195,7 @@ impl RpcSessionManager {
         for gid in gids {
             if let Some(state) = states.get_mut(&gid) {
                 state.status = RpcDownloadStatus::Active;
+                state.run_generation = state.run_generation.saturating_add(1);
                 state.updated_at_ms = now_ms();
                 starts.push(RpcQueuedStart::from_state(state));
             }
@@ -1075,7 +1223,7 @@ impl RpcSessionManager {
                 Ok(session) => Box::pin(session.start()).await,
                 Err(error) => Err(error),
             };
-            manager.finish_download(&start.gid, result);
+            manager.finish_download(&start.gid, start.run_generation, result);
         });
     }
 
@@ -1122,37 +1270,51 @@ impl RpcSessionManager {
         Ok(())
     }
 
-    fn finish_download(&self, gid: &str, result: Result<Vec<ProgressEvent>>) {
-        let mut lifecycle = NOTIFY_COMPLETE;
+    fn finish_download(&self, gid: &str, run_generation: u64, result: Result<Vec<ProgressEvent>>) {
+        let mut lifecycle = Some(NOTIFY_COMPLETE);
+        let mut stale_completion = false;
         if let Ok(mut states) = self.lock_states()
             && let Some(state) = states.get_mut(gid)
         {
-            state.updated_at_ms = now_ms();
-            match result {
-                Ok(events) => {
-                    for event in events {
-                        state.apply_event(&event);
+            if state.run_generation != run_generation {
+                stale_completion = true;
+            } else {
+                state.updated_at_ms = now_ms();
+                match result {
+                    Ok(events) => {
+                        for event in events {
+                            state.apply_event(&event);
+                        }
+                        if state.status != RpcDownloadStatus::Removed {
+                            state.status = RpcDownloadStatus::Complete;
+                        } else {
+                            lifecycle = Some(NOTIFY_STOP);
+                        }
                     }
-                    if state.status != RpcDownloadStatus::Removed {
-                        state.status = RpcDownloadStatus::Complete;
-                    } else {
-                        lifecycle = NOTIFY_STOP;
+                    Err(Error::UserCancelled) => {
+                        if state.status == RpcDownloadStatus::Paused {
+                            lifecycle = None;
+                        } else {
+                            state.status = RpcDownloadStatus::Removed;
+                            state.error_message = Some("operation cancelled".to_string());
+                            lifecycle = Some(NOTIFY_STOP);
+                        }
+                    }
+                    Err(error) => {
+                        state.status = RpcDownloadStatus::Error;
+                        state.error_message = Some(error.to_string());
+                        lifecycle = Some(NOTIFY_ERROR);
                     }
                 }
-                Err(Error::UserCancelled) => {
-                    state.status = RpcDownloadStatus::Removed;
-                    state.error_message = Some("operation cancelled".to_string());
-                    lifecycle = NOTIFY_STOP;
-                }
-                Err(error) => {
-                    state.status = RpcDownloadStatus::Error;
-                    state.error_message = Some(error.to_string());
-                    lifecycle = NOTIFY_ERROR;
-                }
+                prune_retained_states(&mut states, MAX_RETAINED_DOWNLOADS);
             }
-            prune_retained_states(&mut states, MAX_RETAINED_DOWNLOADS);
         }
-        self.send_lifecycle(lifecycle, gid);
+        if stale_completion {
+            return;
+        }
+        if let Some(lifecycle) = lifecycle {
+            self.send_lifecycle(lifecycle, gid);
+        }
         self.start_waiting_downloads();
     }
 
@@ -1203,6 +1365,7 @@ struct RpcQueuedStart {
     options: DownloadOptions,
     stream_selector: StreamSelector,
     cancellation_token: CancellationToken,
+    run_generation: u64,
 }
 
 impl RpcQueuedStart {
@@ -1213,6 +1376,7 @@ impl RpcQueuedStart {
             options: state.options.clone(),
             stream_selector: state.stream_selector.clone(),
             cancellation_token: state.cancellation_token.clone(),
+            run_generation: state.run_generation,
         }
     }
 }
@@ -1226,6 +1390,7 @@ struct RpcDownloadState {
     options_snapshot: Map<String, Value>,
     status: RpcDownloadStatus,
     cancellation_token: CancellationToken,
+    run_generation: u64,
     queue_position: u64,
     total_length: Option<u64>,
     completed_length: u64,
@@ -1259,6 +1424,7 @@ impl RpcDownloadState {
             options_snapshot: init.options_snapshot,
             status: init.status,
             cancellation_token: init.cancellation_token,
+            run_generation: 0,
             queue_position: init.queue_position,
             total_length: None,
             completed_length: 0,
@@ -1296,6 +1462,19 @@ impl RpcDownloadState {
                 if let Some(size) = recorded_size {
                     stream.completed_length = *size;
                 }
+            }
+            ProgressEvent::SegmentFinished {
+                stream_id,
+                segment_index,
+            } => {
+                let stream = self
+                    .streams
+                    .entry(stream_id.clone())
+                    .or_insert_with(|| RpcStreamState::new(stream_id.clone(), stream_id.clone()));
+                stream.finished_segments.insert(*segment_index);
+                stream.completed_segments = stream
+                    .completed_segments
+                    .max(segment_index.saturating_add(1));
             }
             ProgressEvent::OutputArtifact(artifact) => {
                 self.artifacts.push(artifact.path.display().to_string());
@@ -1391,6 +1570,21 @@ impl RpcDownloadState {
             "uploadLength",
             Value::String("0".to_string()),
         );
+        if self.status.is_terminal() {
+            self.insert_status_key(
+                &mut object,
+                keys,
+                "errorCode",
+                Value::String(
+                    if self.status == RpcDownloadStatus::Error {
+                        "1"
+                    } else {
+                        "0"
+                    }
+                    .to_string(),
+                ),
+            );
+        }
         self.insert_status_key(
             &mut object,
             keys,
@@ -1401,7 +1595,25 @@ impl RpcDownloadState {
                 "0".to_string()
             }),
         );
-        self.insert_status_key(&mut object, keys, "dir", Value::String(String::new()));
+        self.insert_status_key(
+            &mut object,
+            keys,
+            "bitfield",
+            Value::String(self.segment_bitfield()),
+        );
+        self.insert_status_key(
+            &mut object,
+            keys,
+            "pieceLength",
+            Value::String(self.segment_piece_length().to_string()),
+        );
+        self.insert_status_key(
+            &mut object,
+            keys,
+            "numPieces",
+            Value::String(self.segment_piece_count().to_string()),
+        );
+        self.insert_status_key(&mut object, keys, "dir", Value::String(self.status_dir()));
         self.insert_status_key(&mut object, keys, "files", Value::Array(self.file_values()));
         self.insert_status_key(
             &mut object,
@@ -1489,6 +1701,54 @@ impl RpcDownloadState {
             .collect()
     }
 
+    fn status_dir(&self) -> String {
+        if let Some(path) = &self.options.save_dir {
+            return path.display().to_string();
+        }
+        std::env::current_dir()
+            .ok()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    }
+
+    fn segment_piece_count(&self) -> u64 {
+        self.streams
+            .values()
+            .map(RpcStreamState::piece_count)
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    fn segment_piece_length(&self) -> u64 {
+        let pieces = self.segment_piece_count();
+        if pieces == 0 {
+            return 0;
+        }
+        self.total_length
+            .map(|total| total.div_ceil(pieces))
+            .unwrap_or(0)
+    }
+
+    fn segment_bitfield(&self) -> String {
+        let total = self.segment_piece_count();
+        if total == 0 {
+            return String::new();
+        }
+        let Ok(byte_len) = usize::try_from(total.div_ceil(8)) else {
+            return String::new();
+        };
+        let mut bytes = vec![0_u8; byte_len];
+        let mut offset = 0_u64;
+        for stream in self.streams.values() {
+            stream.write_bitfield(&mut bytes, offset);
+            offset = offset.saturating_add(stream.piece_count());
+        }
+        bytes
+            .into_iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
     fn insert_status_key(
         &self,
         object: &mut Map<String, Value>,
@@ -1511,6 +1771,7 @@ struct RpcStreamState {
     download_speed: u64,
     completed_segments: u64,
     total_segments: Option<u64>,
+    finished_segments: BTreeSet<u64>,
 }
 
 impl RpcStreamState {
@@ -1523,6 +1784,7 @@ impl RpcStreamState {
             download_speed: 0,
             completed_segments: 0,
             total_segments: None,
+            finished_segments: BTreeSet::new(),
         }
     }
 
@@ -1536,6 +1798,38 @@ impl RpcStreamState {
             "completedSegments": self.completed_segments.to_string(),
             "totalSegments": self.total_segments.unwrap_or(0).to_string(),
         })
+    }
+
+    fn piece_count(&self) -> u64 {
+        self.total_segments
+            .unwrap_or(self.completed_segments)
+            .max(self.completed_segments)
+            .max(u64::try_from(self.finished_segments.len()).unwrap_or(u64::MAX))
+    }
+
+    fn write_bitfield(&self, bytes: &mut [u8], offset: u64) {
+        let piece_count = self.piece_count();
+        if self.finished_segments.is_empty() {
+            for index in 0..self.completed_segments.min(piece_count) {
+                set_bit(bytes, offset.saturating_add(index));
+            }
+            return;
+        }
+        for index in &self.finished_segments {
+            if *index < piece_count {
+                set_bit(bytes, offset.saturating_add(*index));
+            }
+        }
+    }
+}
+
+fn set_bit(bytes: &mut [u8], index: u64) {
+    let Ok(byte_index) = usize::try_from(index / 8) else {
+        return;
+    };
+    if let Some(byte) = bytes.get_mut(byte_index) {
+        let bit = 7_u32.saturating_sub(u32::try_from(index % 8).unwrap_or(0));
+        *byte |= 1_u8 << bit;
     }
 }
 
@@ -2068,6 +2362,7 @@ async fn process_request(
         METHOD_UNPAUSE => unpause_download(&state.manager, &params),
         METHOD_UNPAUSE_ALL => Ok(Value::String(state.manager.unpause_all()?)),
         METHOD_CHANGE_POSITION => change_position(&state.manager, &params),
+        METHOD_CHANGE_URI => change_uri(&state.manager, &params),
         METHOD_CHANGE_OPTION => change_option(&state.manager, &params),
         METHOD_GET_GLOBAL_OPTION => Ok(state.manager.get_global_option()?),
         METHOD_CHANGE_GLOBAL_OPTION => change_global_option(&state.manager, &params),
@@ -2195,6 +2490,11 @@ fn add_uri(manager: &RpcSessionManager, params: &[Value]) -> RpcCallResult<Value
         .first()
         .and_then(Value::as_array)
         .ok_or_else(|| RpcError::invalid_params("haki.addUri requires a URI array"))?;
+    if uri_list.len() != 1 {
+        return Err(RpcError::invalid_params(
+            "haki.addUri requires exactly one URI",
+        ));
+    }
     let input = uri_list
         .first()
         .and_then(Value::as_str)
@@ -2286,9 +2586,25 @@ fn change_position(manager: &RpcSessionManager, params: &[Value]) -> RpcCallResu
         .ok_or_else(|| RpcError::invalid_params("changePosition requires a position"))
         .and_then(|value| option_i64("position", value))?;
     let how = required_string(params, 2, "changePosition requires a position mode")?;
-    Ok(Value::String(
-        manager.change_position(gid, pos, how)?.to_string(),
-    ))
+    Ok(json!(manager.change_position(gid, pos, how)?))
+}
+
+fn change_uri(manager: &RpcSessionManager, params: &[Value]) -> RpcCallResult<Value> {
+    let gid = required_string(params, 0, "changeUri requires a gid")?;
+    let file_index = params
+        .get(1)
+        .ok_or_else(|| RpcError::invalid_params("changeUri requires a file index"))
+        .and_then(|value| option_usize("fileIndex", value))?;
+    if file_index == 0 {
+        return Err(RpcError::invalid_params("fileIndex is out of range"));
+    }
+    let del_uris = parse_uri_list_param(params.get(2), "delUris")?;
+    let add_uris = parse_uri_list_param(params.get(3), "addUris")?;
+    let position = params
+        .get(4)
+        .map(|value| option_i64("position", value))
+        .transpose()?;
+    manager.change_uri(gid, file_index, &del_uris, &add_uris, position)
 }
 
 fn change_option(manager: &RpcSessionManager, params: &[Value]) -> RpcCallResult<Value> {
@@ -2396,6 +2712,21 @@ fn parse_key_filter(value: &Value) -> RpcCallResult<Vec<String>> {
             item.as_str()
                 .map(str::to_string)
                 .ok_or_else(|| RpcError::invalid_params("keys must contain only strings"))
+        })
+        .collect()
+}
+
+fn parse_uri_list_param(value: Option<&Value>, name: &str) -> RpcCallResult<Vec<String>> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError::invalid_params(format!("changeUri requires {name}")))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| RpcError::invalid_params(format!("{name} must contain strings")))
         })
         .collect()
 }
@@ -3577,6 +3908,7 @@ fn supported_methods() -> &'static [&'static str] {
         METHOD_UNPAUSE,
         METHOD_UNPAUSE_ALL,
         METHOD_CHANGE_POSITION,
+        METHOD_CHANGE_URI,
         METHOD_CHANGE_OPTION,
         METHOD_GET_GLOBAL_OPTION,
         METHOD_CHANGE_GLOBAL_OPTION,
@@ -3669,6 +4001,17 @@ fn prune_retained_states(states: &mut BTreeMap<String, RpcDownloadState>, max_le
 fn ordered_states(mut states: Vec<RpcDownloadState>) -> Vec<RpcDownloadState> {
     states.sort_by_key(|state| (state.queue_position, state.created_at_ms));
     states
+}
+
+fn move_queued_state_to_front(states: &mut BTreeMap<String, RpcDownloadState>, gid: &str) {
+    for (candidate_gid, state) in states.iter_mut() {
+        if candidate_gid != gid && state.status.is_queued() {
+            state.queue_position = state.queue_position.saturating_add(1);
+        }
+    }
+    if let Some(state) = states.get_mut(gid) {
+        state.queue_position = 0;
+    }
 }
 
 fn paginate_states(

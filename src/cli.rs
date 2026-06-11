@@ -1141,18 +1141,31 @@ struct Parser {
     options: DownloadOptions,
     rpc_enabled: bool,
     rpc_listen: Option<SocketAddr>,
+    rpc_listen_all_set: bool,
     rpc_listen_all: bool,
+    rpc_listen_port_set: bool,
     rpc_listen_port: u16,
+    rpc_secret_set: bool,
     rpc_secret: Option<String>,
+    rpc_pause_new_downloads_set: bool,
     rpc_pause_new_downloads: bool,
+    rpc_user_set: bool,
     rpc_user: Option<String>,
+    rpc_passwd_set: bool,
     rpc_passwd: Option<String>,
+    rpc_secure_set: bool,
     rpc_secure: bool,
+    rpc_certificate_set: bool,
     rpc_certificate: Option<PathBuf>,
+    rpc_private_key_set: bool,
     rpc_private_key: Option<PathBuf>,
+    rpc_max_request_size_set: bool,
     rpc_max_request_size: usize,
+    rpc_allow_origin_all_set: bool,
     rpc_allow_origin_all: bool,
+    rpc_queue_enabled_set: bool,
     rpc_queue_enabled: bool,
+    rpc_max_concurrent_downloads_set: bool,
     rpc_max_concurrent_downloads: usize,
 }
 
@@ -1170,18 +1183,31 @@ impl Parser {
             options,
             rpc_enabled: false,
             rpc_listen: None,
+            rpc_listen_all_set: false,
             rpc_listen_all: false,
+            rpc_listen_port_set: false,
             rpc_listen_port: 6800,
+            rpc_secret_set: false,
             rpc_secret: None,
+            rpc_pause_new_downloads_set: false,
             rpc_pause_new_downloads: false,
+            rpc_user_set: false,
             rpc_user: None,
+            rpc_passwd_set: false,
             rpc_passwd: None,
+            rpc_secure_set: false,
             rpc_secure: false,
+            rpc_certificate_set: false,
             rpc_certificate: None,
+            rpc_private_key_set: false,
             rpc_private_key: None,
+            rpc_max_request_size_set: false,
             rpc_max_request_size: 2 * 1024 * 1024,
+            rpc_allow_origin_all_set: false,
             rpc_allow_origin_all: false,
+            rpc_queue_enabled_set: false,
             rpc_queue_enabled: false,
+            rpc_max_concurrent_downloads_set: false,
             rpc_max_concurrent_downloads: 4,
         }
     }
@@ -1454,34 +1480,43 @@ impl Parser {
                     )?)
                 }
                 "--rpc-listen-all" => {
+                    self.rpc_listen_all_set = true;
                     self.rpc_listen_all = self.bool_value(inline_value)?;
                 }
                 "--rpc-listen-port" => {
+                    self.rpc_listen_port_set = true;
                     self.rpc_listen_port =
                         parse_port(&self.value(token, inline_value)?, "--rpc-listen-port")?;
                 }
                 "--rpc-secret" => {
+                    self.rpc_secret_set = true;
                     let value = self.value(token, inline_value)?;
                     self.rpc_secret = if value.is_empty() { None } else { Some(value) };
                 }
                 "--pause" => {
+                    self.rpc_pause_new_downloads_set = true;
                     self.rpc_pause_new_downloads = self.bool_value(inline_value)?;
                     if self.rpc_pause_new_downloads {
+                        self.rpc_queue_enabled_set = true;
                         self.rpc_queue_enabled = true;
                     }
                 }
                 "--rpc-user" => {
+                    self.rpc_user_set = true;
                     let value = self.value(token, inline_value)?;
                     self.rpc_user = if value.is_empty() { None } else { Some(value) };
                 }
                 "--rpc-passwd" => {
+                    self.rpc_passwd_set = true;
                     let value = self.value(token, inline_value)?;
                     self.rpc_passwd = if value.is_empty() { None } else { Some(value) };
                 }
                 "--rpc-secure" => {
+                    self.rpc_secure_set = true;
                     self.rpc_secure = self.bool_value(inline_value)?;
                 }
                 "--rpc-certificate" => {
+                    self.rpc_certificate_set = true;
                     let value = self.value(token, inline_value)?;
                     self.rpc_certificate = if value.is_empty() {
                         None
@@ -1490,6 +1525,7 @@ impl Parser {
                     };
                 }
                 "--rpc-private-key" => {
+                    self.rpc_private_key_set = true;
                     let value = self.value(token, inline_value)?;
                     self.rpc_private_key = if value.is_empty() {
                         None
@@ -1498,23 +1534,28 @@ impl Parser {
                     };
                 }
                 "--rpc-max-request-size" => {
+                    self.rpc_max_request_size_set = true;
                     self.rpc_max_request_size = parse_size_bytes(
                         &self.value(token, inline_value)?,
                         "--rpc-max-request-size",
                     )?;
                 }
                 "--rpc-allow-origin-all" => {
+                    self.rpc_allow_origin_all_set = true;
                     self.rpc_allow_origin_all = self.bool_value(inline_value)?;
                 }
                 "--rpc-queue" => {
+                    self.rpc_queue_enabled_set = true;
                     self.rpc_queue_enabled = self.bool_value(inline_value)?;
                 }
                 "--rpc-max-concurrent-downloads" => {
+                    self.rpc_max_concurrent_downloads_set = true;
                     self.rpc_max_concurrent_downloads = parse_usize(
                         &self.value(token, inline_value)?,
                         "--rpc-max-concurrent-downloads",
                     )?
                     .max(1);
+                    self.rpc_queue_enabled_set = true;
                     self.rpc_queue_enabled = true;
                 }
                 value if value.starts_with('-') => {
@@ -1566,16 +1607,8 @@ impl Parser {
             });
         }
 
-        if self.rpc_pause_new_downloads
-            || self.rpc_user.is_some()
-            || self.rpc_passwd.is_some()
-            || self.rpc_secure
-            || self.rpc_certificate.is_some()
-            || self.rpc_private_key.is_some()
-        {
-            return Err(Error::config(
-                "--pause, --rpc-user, --rpc-passwd, --rpc-secure, --rpc-certificate, and --rpc-private-key require --enable-rpc",
-            ));
+        if self.rpc_options_without_server_mode() {
+            return Err(Error::config("JSON-RPC options require --enable-rpc"));
         }
 
         let input = match self.input {
@@ -1616,6 +1649,23 @@ impl Parser {
             self.index += 1;
         }
         value
+    }
+
+    fn rpc_options_without_server_mode(&self) -> bool {
+        self.rpc_listen.is_some()
+            || self.rpc_listen_all_set
+            || self.rpc_listen_port_set
+            || self.rpc_secret_set
+            || self.rpc_pause_new_downloads_set
+            || self.rpc_user_set
+            || self.rpc_passwd_set
+            || self.rpc_secure_set
+            || self.rpc_certificate_set
+            || self.rpc_private_key_set
+            || self.rpc_max_request_size_set
+            || self.rpc_allow_origin_all_set
+            || self.rpc_queue_enabled_set
+            || self.rpc_max_concurrent_downloads_set
     }
 
     fn peek_token(&self) -> Option<&str> {
