@@ -35,6 +35,8 @@ mod numeric;
 pub mod observability;
 pub mod processor;
 pub mod progress;
+#[cfg(feature = "rpc")]
+pub mod rpc;
 pub mod selection;
 pub mod session;
 pub mod source;

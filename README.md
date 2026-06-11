@@ -28,14 +28,15 @@
 
 ```toml
 [dependencies]
-haki-dl = "0.2.0"
+haki-dl = "0.3.0"
 tokio = { version = "1.52.1", features = ["rt-multi-thread", "macros"] }
 
 # With optional features:
-# haki-dl = { version = "0.2.0", features = ["mp4forge"] }
-# haki-dl = { version = "0.2.0", features = ["serde"] }
+# haki-dl = { version = "0.3.0", features = ["mp4forge"] }
+# haki-dl = { version = "0.3.0", features = ["rpc"] }
+# haki-dl = { version = "0.3.0", features = ["serde"] }
 # Minimal builds can opt out of defaults:
-# haki-dl = { version = "0.2.0", default-features = false }
+# haki-dl = { version = "0.3.0", default-features = false }
 ```
 
 Install the CLI from crates.io:
@@ -60,6 +61,7 @@ API consumers need a Tokio runtime. The CLI creates its own runtime, but library
 
 - `cli`: retained as the default CLI-capable package feature. The `haki-dl` binary is built from `src/main.rs` and is not hidden behind a `required-features` gate.
 - `mp4forge`: enables the published `mp4forge` crate backend for default in-process MP4 decryption and explicit MP4-family mux requests. Muxing is not selected by default.
+- `rpc`: enables the optional haki-native JSON-RPC server over HTTP POST and WebSocket, including queue-aware download control, status queries, and structured progress notifications.
 - `serde`: derives `Serialize` and `Deserialize` for reusable public metadata/report types where exposed.
 
 HLS, DASH, MSS, live, decrypt, capture, and license are not Cargo feature flags. Core protocol/decrypt/live behavior stays available in the library until there is a real, tested need for coarse minimal-build gates. ffmpeg is validated at session startup for compatibility runtime behavior. mkvmerge and external decrypt tools are runtime process tools selected through options such as `mkvmerge_binary_path`, `decryption_engine`, `decryption_binary_path`, and `mux_after_done`. They are intentionally not Cargo feature flags.

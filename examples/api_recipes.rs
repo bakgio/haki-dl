@@ -7,34 +7,39 @@ use haki_dl::{
     DownloadRequest, MuxAfterDoneOptions, MuxFormat, MuxerKind, ProgressEvent, StreamSelector,
     summarize_events,
 };
+use tempfile::TempDir;
 
 #[tokio::main]
 async fn main() -> haki_dl::Result<()> {
-    let workspace = prepare_workspace("haki_dl_api_recipes").await?;
-    let hls_input = write_hls_fixture(&workspace).await?;
-    let dash_input = write_dash_fixture(&workspace).await?;
+    let workspace = prepare_workspace("haki_dl_api_recipes")?;
+    let workspace_path = workspace.path();
+    let hls_input = write_hls_fixture(workspace_path).await?;
+    let dash_input = write_dash_fixture(workspace_path).await?;
     let token = CancellationToken::new();
     let mut recipes = vec![
-        ("simple_hls", simple_hls_request(&hls_input, &workspace)),
-        ("simple_dash", simple_dash_request(&dash_input, &workspace)),
+        ("simple_hls", simple_hls_request(&hls_input, workspace_path)),
+        (
+            "simple_dash",
+            simple_dash_request(&dash_input, workspace_path),
+        ),
         (
             "default_decrypt",
-            encrypted_request_with_default_decrypt(&dash_input, &workspace),
+            encrypted_request_with_default_decrypt(&dash_input, workspace_path),
         ),
         (
             "custom_headers_proxy",
-            custom_header_proxy_request(&hls_input, &workspace),
+            custom_header_proxy_request(&hls_input, workspace_path),
         ),
         (
             "cancellable_live",
-            cancellable_live_request(&hls_input, &workspace, token.clone()),
+            cancellable_live_request(&hls_input, workspace_path, token.clone()),
         ),
         (
             "explicit_mp4_mux",
-            explicit_mp4_mux_request(&dash_input, &workspace),
+            explicit_mp4_mux_request(&dash_input, workspace_path),
         ),
     ];
-    if let Some(request) = external_decrypt_request(&dash_input, &workspace) {
+    if let Some(request) = external_decrypt_request(&dash_input, workspace_path) {
         recipes.push(("external_decrypt", request));
     } else {
         println!("external_decrypt skipped: ffmpeg was not found on PATH");
@@ -55,13 +60,10 @@ async fn main() -> haki_dl::Result<()> {
     Ok(())
 }
 
-async fn prepare_workspace(name: &str) -> haki_dl::Result<PathBuf> {
-    let workspace = std::env::temp_dir().join(name);
-    if tokio::fs::metadata(&workspace).await.is_ok() {
-        tokio::fs::remove_dir_all(&workspace).await?;
-    }
-    tokio::fs::create_dir_all(&workspace).await?;
-    Ok(workspace)
+fn prepare_workspace(name: &str) -> haki_dl::Result<TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir()?)
 }
 
 async fn write_hls_fixture(workspace: &Path) -> haki_dl::Result<PathBuf> {
