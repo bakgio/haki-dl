@@ -788,13 +788,14 @@ const fn hidden_schema_row(
 #[derive(Clone, Debug)]
 pub enum CliParseResult {
     Request(Box<DownloadRequest>),
-    Help {
-        text: String,
-    },
-    MoreHelp {
-        topic: Option<String>,
-        text: String,
-    },
+    Help { text: String },
+    MoreHelp { topic: Option<String>, text: String },
+    Version { text: String },
+}
+
+#[derive(Clone, Debug)]
+enum ParsedCliResult {
+    Public(CliParseResult),
     RpcServer {
         listen: SocketAddr,
         secret: Option<String>,
@@ -809,9 +810,17 @@ pub enum CliParseResult {
         queue_enabled: bool,
         max_concurrent_downloads: usize,
     },
-    Version {
-        text: String,
-    },
+}
+
+impl ParsedCliResult {
+    fn into_public(self) -> Result<CliParseResult> {
+        match self {
+            Self::Public(result) => Ok(result),
+            Self::RpcServer { .. } => Err(Error::config(
+                "JSON-RPC server mode is available through run_cli or RpcServerBuilder",
+            )),
+        }
+    }
 }
 
 #[cfg(feature = "rpc")]
@@ -839,7 +848,8 @@ where
 {
     Parser::new(args.into_iter().map(Into::into).collect())
         .parse()
-        .await
+        .await?
+        .into_public()
 }
 
 /// Runs the current CLI shell.
@@ -850,8 +860,8 @@ where
 {
     let tokens = args.into_iter().map(Into::into).collect::<Vec<_>>();
     let detected_language = pre_scan_ui_language(&tokens);
-    match parse_args(tokens.iter().cloned()).await {
-        Ok(CliParseResult::Request(request)) => {
+    match Parser::new(tokens.clone()).parse().await {
+        Ok(ParsedCliResult::Public(CliParseResult::Request(request))) => {
             let mut request = *request;
             let language = request.options.ui_language.or(detected_language);
             let stdout_redirected = !std::io::stdout().is_terminal();
@@ -882,18 +892,18 @@ where
                 }
             }
         }
-        Ok(CliParseResult::MoreHelp { text, .. }) => {
+        Ok(ParsedCliResult::Public(CliParseResult::MoreHelp { text, .. })) => {
             println!("{text}");
             ExitCode::SUCCESS
         }
-        Ok(result @ CliParseResult::RpcServer { .. }) => {
+        Ok(result @ ParsedCliResult::RpcServer { .. }) => {
             run_rpc_server(result, detected_language).await
         }
-        Ok(CliParseResult::Help { text }) => {
+        Ok(ParsedCliResult::Public(CliParseResult::Help { text })) => {
             println!("{text}");
             ExitCode::SUCCESS
         }
-        Ok(CliParseResult::Version { text }) => {
+        Ok(ParsedCliResult::Public(CliParseResult::Version { text })) => {
             println!("{text}");
             ExitCode::SUCCESS
         }
@@ -1000,8 +1010,8 @@ fn render_standalone_cli_error(error: &Error, language: Option<UiLanguage>) {
 }
 
 #[cfg(feature = "rpc")]
-async fn run_rpc_server(result: CliParseResult, language: Option<UiLanguage>) -> ExitCode {
-    let CliParseResult::RpcServer {
+async fn run_rpc_server(result: ParsedCliResult, language: Option<UiLanguage>) -> ExitCode {
+    let ParsedCliResult::RpcServer {
         listen,
         secret,
         pause_new_downloads,
@@ -1089,7 +1099,7 @@ async fn run_rpc_server(result: CliParseResult, language: Option<UiLanguage>) ->
 }
 
 #[cfg(not(feature = "rpc"))]
-async fn run_rpc_server(_result: CliParseResult, language: Option<UiLanguage>) -> ExitCode {
+async fn run_rpc_server(_result: ParsedCliResult, language: Option<UiLanguage>) -> ExitCode {
     render_standalone_cli_error(
         &Error::config("JSON-RPC server support is not enabled in this build"),
         language,
@@ -1212,7 +1222,7 @@ impl Parser {
         }
     }
 
-    async fn parse(mut self) -> Result<CliParseResult> {
+    async fn parse(mut self) -> Result<ParsedCliResult> {
         while let Some(raw_token) = self.take_token() {
             let (token, inline_value) = split_inline_option(raw_token);
             let option_name = token.clone();
@@ -1221,15 +1231,17 @@ impl Parser {
                     if inline_value.is_some() {
                         return Err(Error::config("--help does not accept a value"));
                     }
-                    return Ok(CliParseResult::Help { text: help_text() });
+                    return Ok(ParsedCliResult::Public(CliParseResult::Help {
+                        text: help_text(),
+                    }));
                 }
                 "--version" => {
                     if inline_value.is_some() {
                         return Err(Error::config("--version does not accept a value"));
                     }
-                    return Ok(CliParseResult::Version {
+                    return Ok(ParsedCliResult::Public(CliParseResult::Version {
                         text: version_text(),
-                    });
+                    }));
                 }
                 "--morehelp" => {
                     if inline_value.is_some() {
@@ -1238,10 +1250,10 @@ impl Parser {
                     let topic = self
                         .take_token()
                         .ok_or_else(|| Error::config("--morehelp requires a value"))?;
-                    return Ok(CliParseResult::MoreHelp {
+                    return Ok(ParsedCliResult::Public(CliParseResult::MoreHelp {
                         text: morehelp_text(&topic, self.options.ui_language),
                         topic: Some(topic),
-                    });
+                    }));
                 }
                 "--tmp-dir" => {
                     self.options.tmp_dir = Some(PathBuf::from(self.value(token, inline_value)?))
@@ -1589,7 +1601,7 @@ impl Parser {
                     "--rpc-certificate and --rpc-private-key require --rpc-secure",
                 ));
             }
-            return Ok(CliParseResult::RpcServer {
+            return Ok(ParsedCliResult::RpcServer {
                 listen: self
                     .rpc_listen
                     .unwrap_or_else(|| rpc_bind_addr(self.rpc_listen_all, self.rpc_listen_port)),
@@ -1636,11 +1648,11 @@ impl Parser {
         } else {
             StreamSelector::default()
         };
-        Ok(CliParseResult::Request(Box::new(
+        Ok(ParsedCliResult::Public(CliParseResult::Request(Box::new(
             DownloadRequest::new(input)
                 .with_options(options)
                 .with_stream_selector(stream_selector),
-        )))
+        ))))
     }
 
     fn take_token(&mut self) -> Option<String> {
@@ -2938,7 +2950,7 @@ fn help_option_description(row: &CliOptionSchema) -> String {
         "save_pattern" => {
             "Set output filename pattern with variables:\n<SaveName>, <Id>, <Codecs>, <Language>, <Resolution>,\n<Bandwidth>, <MediaType>, <Channels>, <FrameRate>,\n<VideoRange>, <GroupId>, <Ext>\nExample: --save-pattern \"<SaveName>_<Resolution>_<Bandwidth>\""
         }
-        "log_file_path" => "Set log file path, Example: C:\\Logs\\log.txt",
+        "log_file_path" => "Set log file path, Example: ./logs/log.txt or C:\\Logs\\log.txt",
         "base_url" => "Set BaseURL",
         "thread_count" => "Set download thread count",
         "download_retry_count" => "The number of retries when download segment error",
@@ -2970,7 +2982,9 @@ fn help_option_description(row: &CliOptionSchema) -> String {
         "sub_only" => "Select only subtitle tracks",
         "sub_format" => "Subtitle output format",
         "auto_subtitle_fix" => "Automatically fix subtitles",
-        "ffmpeg_binary_path" => "Full path to the ffmpeg binary, like C:\\Tools\\ffmpeg.exe",
+        "ffmpeg_binary_path" => {
+            "Full path to the ffmpeg binary, like /usr/bin/ffmpeg or C:\\Tools\\ffmpeg.exe"
+        }
         "log_level" => "Set log level",
         "ui_language" => "Set UI language",
         "urlprocessor_args" => "Give these arguments to the URL Processors.",
@@ -2982,7 +2996,7 @@ fn help_option_description(row: &CliOptionSchema) -> String {
         }
         "decryption_engine" => "Set the third-party program used for decryption",
         "decryption_binary_path" => {
-            "Full path to the tool used for MP4 decryption, like C:\\Tools\\mp4decrypt.exe"
+            "Full path to the tool used for MP4 decryption, like /usr/bin/mp4decrypt or C:\\Tools\\mp4decrypt.exe"
         }
         "mp4_real_time_decryption" => "Decrypt MP4 segments in real time",
         "select_video" => {

@@ -5,16 +5,17 @@ use haki_dl::{
     DownloadClient, DownloadOptions, DownloadRequest, ProgressCallback, ProgressEventCollector,
     StreamSelector, summarize_events,
 };
+use tempfile::TempDir;
 
 #[tokio::main]
 async fn main() -> haki_dl::Result<()> {
-    let workspace = prepare_workspace("haki_dl_basic_api").await?;
-    let input = write_hls_fixture(&workspace).await?;
+    let workspace = prepare_workspace("haki_dl_basic_api")?;
+    let input = write_hls_fixture(workspace.path()).await?;
     let callback_events = Arc::new(Mutex::new(ProgressEventCollector::new()));
     let callback_sink = Arc::clone(&callback_events);
 
     let request = DownloadRequest::new(input.to_string_lossy().into_owned())
-        .with_options(example_options(&workspace, "basic_api"))
+        .with_options(example_options(workspace.path(), "basic_api"))
         .with_stream_selector(StreamSelector::Auto)
         .with_progress_callback(ProgressCallback::new(move |event| {
             if let Ok(mut collector) = callback_sink.lock() {
@@ -40,13 +41,10 @@ async fn main() -> haki_dl::Result<()> {
     Ok(())
 }
 
-async fn prepare_workspace(name: &str) -> haki_dl::Result<PathBuf> {
-    let workspace = std::env::temp_dir().join(name);
-    if tokio::fs::metadata(&workspace).await.is_ok() {
-        tokio::fs::remove_dir_all(&workspace).await?;
-    }
-    tokio::fs::create_dir_all(&workspace).await?;
-    Ok(workspace)
+fn prepare_workspace(name: &str) -> haki_dl::Result<TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix(&format!("{name}-"))
+        .tempdir()?)
 }
 
 async fn write_hls_fixture(workspace: &Path) -> haki_dl::Result<PathBuf> {
