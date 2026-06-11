@@ -796,6 +796,7 @@ pub enum CliParseResult {
 #[derive(Clone, Debug)]
 enum ParsedCliResult {
     Public(CliParseResult),
+    #[cfg(feature = "rpc")]
     RpcServer {
         listen: SocketAddr,
         secret: Option<String>,
@@ -810,13 +811,20 @@ enum ParsedCliResult {
         queue_enabled: bool,
         max_concurrent_downloads: usize,
     },
+    #[cfg(not(feature = "rpc"))]
+    RpcServerDisabled,
 }
 
 impl ParsedCliResult {
     fn into_public(self) -> Result<CliParseResult> {
         match self {
             Self::Public(result) => Ok(result),
+            #[cfg(feature = "rpc")]
             Self::RpcServer { .. } => Err(Error::config(
+                "JSON-RPC server mode is available through run_cli or RpcServerBuilder",
+            )),
+            #[cfg(not(feature = "rpc"))]
+            Self::RpcServerDisabled => Err(Error::config(
                 "JSON-RPC server mode is available through run_cli or RpcServerBuilder",
             )),
         }
@@ -896,7 +904,12 @@ where
             println!("{text}");
             ExitCode::SUCCESS
         }
+        #[cfg(feature = "rpc")]
         Ok(result @ ParsedCliResult::RpcServer { .. }) => {
+            run_rpc_server(result, detected_language).await
+        }
+        #[cfg(not(feature = "rpc"))]
+        Ok(result @ ParsedCliResult::RpcServerDisabled) => {
             run_rpc_server(result, detected_language).await
         }
         Ok(ParsedCliResult::Public(CliParseResult::Help { text })) => {
@@ -1601,22 +1614,29 @@ impl Parser {
                     "--rpc-certificate and --rpc-private-key require --rpc-secure",
                 ));
             }
-            return Ok(ParsedCliResult::RpcServer {
-                listen: self
-                    .rpc_listen
-                    .unwrap_or_else(|| rpc_bind_addr(self.rpc_listen_all, self.rpc_listen_port)),
-                secret: self.rpc_secret,
-                pause_new_downloads: self.rpc_pause_new_downloads,
-                rpc_user: self.rpc_user,
-                rpc_passwd: self.rpc_passwd,
-                rpc_secure: self.rpc_secure,
-                rpc_certificate: self.rpc_certificate,
-                rpc_private_key: self.rpc_private_key,
-                max_request_size: self.rpc_max_request_size,
-                allow_origin_all: self.rpc_allow_origin_all,
-                queue_enabled: self.rpc_queue_enabled,
-                max_concurrent_downloads: self.rpc_max_concurrent_downloads,
-            });
+            #[cfg(feature = "rpc")]
+            {
+                return Ok(ParsedCliResult::RpcServer {
+                    listen: self.rpc_listen.unwrap_or_else(|| {
+                        rpc_bind_addr(self.rpc_listen_all, self.rpc_listen_port)
+                    }),
+                    secret: self.rpc_secret,
+                    pause_new_downloads: self.rpc_pause_new_downloads,
+                    rpc_user: self.rpc_user,
+                    rpc_passwd: self.rpc_passwd,
+                    rpc_secure: self.rpc_secure,
+                    rpc_certificate: self.rpc_certificate,
+                    rpc_private_key: self.rpc_private_key,
+                    max_request_size: self.rpc_max_request_size,
+                    allow_origin_all: self.rpc_allow_origin_all,
+                    queue_enabled: self.rpc_queue_enabled,
+                    max_concurrent_downloads: self.rpc_max_concurrent_downloads,
+                });
+            }
+            #[cfg(not(feature = "rpc"))]
+            {
+                return Ok(ParsedCliResult::RpcServerDisabled);
+            }
         }
 
         if self.rpc_options_without_server_mode() {
@@ -1815,6 +1835,7 @@ fn parse_socket_addr(value: &str, option: &str) -> Result<SocketAddr> {
         .map_err(|error| Error::config(format!("{option} must be a host:port address: {error}")))
 }
 
+#[cfg(feature = "rpc")]
 fn rpc_bind_addr(listen_all: bool, port: u16) -> SocketAddr {
     if listen_all {
         SocketAddr::from(([0, 0, 0, 0], port))
